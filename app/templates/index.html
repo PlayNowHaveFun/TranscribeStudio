@@ -83,6 +83,15 @@
           <label class="check"><input type="checkbox" id="np-nocontext" /> --no-context (anti-loop)</label>
           <label class="check"><input type="checkbox" id="np-acpower" checked /> Require AC power</label>
         </div>
+        <div class="row">
+          <label class="check"><input type="checkbox" id="np-youtube" /> Enable YouTube ingest</label>
+          <label>Default mode
+            <select id="np-youtube-mode">
+              <option value="speech">Speech (podcasts, interviews)</option>
+              <option value="music">Music (vocal/instrumental split)</option>
+            </select>
+          </label>
+        </div>
         <label>Required volumes <span class="muted small">(absolute paths, one per line)</span>
           <textarea id="np-volumes" rows="2" placeholder="/Volumes/MyDrive"></textarea>
         </label>

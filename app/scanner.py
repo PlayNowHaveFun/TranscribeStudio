@@ -23,9 +23,12 @@ def scan_project(project: Project) -> list[dict]:
         duration_sec: 0 (filled lazily by UI on demand),
         has_transcript: bool,
         transcript_path: optional str,
+        source: "folder" | "youtube",  # where this file came from
       }
     """
     rows: list[dict] = []
+
+    # Existing behavior: top-level iterdir of every configured folder.
     for folder in project.folders:
         f = Path(folder).expanduser()
         if not f.exists():
@@ -47,7 +50,38 @@ def scan_project(project: Project) -> list[dict]:
                 "mtime": stat.st_mtime,
                 "has_transcript": tx_path.exists(),
                 "transcript_path": str(tx_path) if tx_path.exists() else None,
+                "source": "folder",
             })
+
+    # YouTube ingest: walk one extra level into <folders[0]>/<youtube_subdir>/<title>/
+    # so files produced by yt_ingest become scannable by the existing pipeline.
+    # transcriptions/ subdirs are naturally skipped because they're dirs not files.
+    if project.youtube_enabled and project.folders:
+        yt_root = Path(project.folders[0]).expanduser() / project.youtube_subdir
+        if yt_root.exists():
+            for url_folder in yt_root.iterdir():
+                if not url_folder.is_dir():
+                    continue
+                for entry in url_folder.iterdir():
+                    if not entry.is_file():
+                        continue
+                    if entry.suffix.lower() not in ALL_EXT:
+                        continue
+                    if any(fnmatch.fnmatch(entry.name, pat) for pat in project.exclude_patterns):
+                        continue
+                    tx_path = Engine.transcript_path_for(entry, project.config, "txt")
+                    stat = entry.stat()
+                    rows.append({
+                        "path": str(entry),
+                        "name": entry.name,
+                        "folder": str(url_folder),
+                        "size_bytes": stat.st_size,
+                        "mtime": stat.st_mtime,
+                        "has_transcript": tx_path.exists(),
+                        "transcript_path": str(tx_path) if tx_path.exists() else None,
+                        "source": "youtube",
+                    })
+
     return rows
 
 

@@ -293,6 +293,8 @@ function renderProjectStructure() {
 
     <div id="now-playing-card"></div>
 
+    <div id="youtube-card"></div>
+
     <div class="card" id="files-card">
       <div class="flex-between" style="margin-bottom:12px;">
         <h3 class="card-title" style="margin:0;">Files</h3>
@@ -350,10 +352,12 @@ function updateProjectLive(prevStatus) {
     ${p.no_context ? '<span class="tag">no-context</span>' : ""}
     <span class="tag">${p.ordering.replace("_", " ")}</span>
     ${p.auto_run ? '<span class="tag success">auto-run</span>' : '<span class="tag">manual</span>'}
+    ${p.youtube_enabled ? '<span class="tag accent">YouTube</span>' : ""}
   `;
 
   renderHeaderActions(s.worker.paused);
   renderNowPlayingInto("now-playing-card");
+  renderYoutubePanelInto("youtube-card", p, prevStatus);
 
   // Refresh file list if:
   //   - >15s since last fetch
@@ -410,6 +414,22 @@ function renderNowPlayingInto(targetId) {
   if (ev.phase === "chunk" && payload.chunk && payload.of) {
     chunkInfo = `Chunk ${payload.chunk} / ${payload.of}`;
     phaseText = "transcribing";
+  }
+  // YouTube ingest phases — map to friendlier labels with percent if present
+  const YT_PHASE_LABELS = {
+    preflight_yt:       "preparing YouTube ingest",
+    download_start:     "downloading",
+    download_progress:  "downloading",
+    download_done:      "download complete",
+    separate_start:     "separating vocals (Demucs)",
+    separate_progress:  "separating vocals (Demucs)",
+    separate_done:      "separation complete",
+  };
+  if (YT_PHASE_LABELS[ev.phase]) {
+    phaseText = YT_PHASE_LABELS[ev.phase];
+    if (typeof payload.percent === "number") {
+      chunkInfo = `${Math.round(payload.percent)}%`;
+    }
   }
 
   // Build skeleton if not present, otherwise patch in place
@@ -543,6 +563,241 @@ function bindFileRowHandlers() {
   });
 }
 
+// ---------- youtube panel ----------
+
+let youtubeListCache = [];
+let youtubeListLastFetchedFor = null;
+let youtubeListLastFetchedAt = 0;
+
+const YT_STATUS_TAG = {
+  queued:       '<span class="tag">queued</span>',
+  downloading:  '<span class="tag accent">downloading</span>',
+  separating:   '<span class="tag accent">separating</span>',
+  transcribing: '<span class="tag accent">transcribing</span>',
+  done:         '<span class="tag success">done</span>',
+  failed:       '<span class="tag danger">failed</span>',
+};
+
+function renderYoutubePanelInto(targetId, p, prevStatus) {
+  const target = $("#" + targetId);
+  if (!target) return;
+
+  // Card skeleton, rendered once and patched after
+  if (!target.querySelector(".yt-card")) {
+    target.innerHTML = `
+      <div class="card yt-card">
+        <div class="flex-between" style="margin-bottom:8px;">
+          <h3 class="card-title" style="margin:0;">YouTube ingest</h3>
+          <div id="yt-toggle"></div>
+        </div>
+        <div id="yt-body"></div>
+      </div>
+    `;
+  }
+
+  // Header toggle (enabled / disabled) — always visible
+  const tog = $("#yt-toggle");
+  tog.innerHTML = p.youtube_enabled
+    ? `<button class="btn-secondary" id="yt-disable-btn">Disable</button>`
+    : `<button class="btn-primary" id="yt-enable-btn">Enable for this project</button>`;
+  if ($("#yt-enable-btn")) $("#yt-enable-btn").onclick = () => toggleYoutube(p.id, true);
+  if ($("#yt-disable-btn")) $("#yt-disable-btn").onclick = () => toggleYoutube(p.id, false);
+
+  const body = $("#yt-body");
+  if (!p.youtube_enabled) {
+    if (!body.querySelector(".yt-disabled-msg")) {
+      body.innerHTML = `<div class="muted small yt-disabled-msg">
+        Disabled. Enabling lets you paste a YouTube URL to download (and optionally
+        separate vocals via Demucs) into <code>${escapeHtml(p.folders[0] || "(no folder)")}/youtube/</code>.
+        Requires <code>yt-dlp</code> and (for music mode) <code>demucs</code> installed.
+      </div>`;
+    }
+    return;
+  }
+
+  // Enabled: render input + list. Skeleton once, patch list on update.
+  if (!body.querySelector(".yt-input-row")) {
+    body.innerHTML = `
+      <div class="yt-input-row" style="display:flex; gap:8px; align-items:center; margin-bottom:12px;">
+        <input type="url" id="yt-url-input" placeholder="https://www.youtube.com/watch?v=..."
+               style="flex:1; padding:8px; border:1px solid var(--border); border-radius:6px;"/>
+        <select id="yt-mode-select" style="padding:8px; border:1px solid var(--border); border-radius:6px;">
+          <option value="speech">Speech</option>
+          <option value="music">Music</option>
+        </select>
+        <button class="btn-primary" id="yt-submit-btn">Add URL</button>
+      </div>
+      <div id="yt-list"></div>
+    `;
+    $("#yt-mode-select").value = p.youtube_default_mode || "speech";
+    $("#yt-submit-btn").onclick = () => submitYoutubeUrl(p.id);
+    $("#yt-url-input").addEventListener("keydown", (e) => {
+      if (e.key === "Enter") submitYoutubeUrl(p.id);
+    });
+  }
+
+  // Fetch on view-enter, or when youtube_total changes vs. prev poll,
+  // or when stale (>10s). Keeps the panel responsive without thrashing.
+  const now = Date.now() / 1000;
+  const stale = (now - youtubeListLastFetchedAt) > 10;
+  const prevP = prevStatus?.projects?.find(x => x.id === p.id);
+  const totalChanged = prevP && prevP.youtube_total !== p.youtube_total;
+  const projectSwitched = youtubeListLastFetchedFor !== p.id;
+  if (projectSwitched || stale || totalChanged) {
+    fetchAndRenderYoutubeList(p.id);
+  } else {
+    renderYoutubeListFromCache();
+  }
+}
+
+async function fetchAndRenderYoutubeList(pid) {
+  try {
+    const data = await api(`/api/projects/${pid}/youtube`);
+    youtubeListCache = data.urls || [];
+    youtubeListLastFetchedFor = pid;
+    youtubeListLastFetchedAt = Date.now() / 1000;
+    renderYoutubeListFromCache();
+  } catch (e) { /* keep old list */ }
+}
+
+function renderYoutubeListFromCache() {
+  const list = $("#yt-list");
+  if (!list) return;
+  if (youtubeListCache.length === 0) {
+    list.innerHTML = `<div class="muted small">No URLs yet — paste one above to ingest.</div>`;
+    return;
+  }
+  // Sort: in-flight first, then queued (priority within queued), then terminal
+  const order = { downloading: 0, separating: 1, transcribing: 2, queued: 3, failed: 4, done: 5 };
+  const sorted = [...youtubeListCache].sort((a, b) => {
+    const so = (order[a.status] ?? 9) - (order[b.status] ?? 9);
+    if (so !== 0) return so;
+    // Within same status, priority rows first (for queued); then submission order.
+    if ((a.priority ?? false) !== (b.priority ?? false)) return a.priority ? -1 : 1;
+    return (a.submitted_at || "").localeCompare(b.submitted_at || "");
+  });
+  list.innerHTML = `<table class="file-table yt-table">
+    <thead><tr><th>Title / URL</th><th>Mode</th><th>Status</th><th>Submitted</th><th></th></tr></thead>
+    <tbody>${sorted.map(youtubeRow).join("")}</tbody>
+  </table>`;
+  bindYoutubeRowHandlers();
+}
+
+function youtubeRow(r) {
+  const title = r.title || r.url;
+  const submitted = r.submitted_at
+    ? new Date(r.submitted_at).toLocaleString()
+    : "—";
+  const stageInfo = (r.status && r.stage && r.status !== r.stage)
+    ? `<span class="muted small"> · ${escapeHtml(r.stage)}</span>` : "";
+  const priorityBadge = r.priority
+    ? ' <span class="tag accent" title="Up next">↑ up next</span>'
+    : "";
+  const failReason = r.failed_reason
+    ? `<div class="muted small" style="margin-top:2px;">${escapeHtml(r.failed_reason)}</div>`
+    : "";
+  const statusTag = (YT_STATUS_TAG[r.status] || `<span class="tag">${r.status}</span>`) + stageInfo + priorityBadge;
+  return `<tr data-url-id="${escapeAttr(r.id)}" class="yt-${r.status}">
+    <td><div class="filename" title="${escapeAttr(r.url)}">${escapeHtml(title)}</div>${failReason}</td>
+    <td><span class="tag">${escapeHtml(r.mode)}</span></td>
+    <td>${statusTag}</td>
+    <td class="muted small">${escapeHtml(submitted)}</td>
+    <td><div class="actions">
+      ${r.status === "queued" && !r.priority ?
+        '<button class="btn-icon yt-action-priority" title="Run this URL before others in the queue">↑ up next</button>' : ""}
+      ${r.status === "queued" && r.priority ?
+        '<button class="btn-icon yt-action-unpriority" title="Drop priority — back to submission order">unprioritize</button>' : ""}
+      ${r.status === "failed" ? '<button class="btn-icon yt-action-retry" title="Retry">retry</button>' : ""}
+      ${(r.status === "queued" || r.status === "failed" || r.status === "done") ?
+        '<button class="btn-icon yt-action-remove" title="Remove">×</button>' : ""}
+    </div></td>
+  </tr>`;
+}
+
+function bindYoutubeRowHandlers() {
+  const pid = state.selectedProjectId;
+  $$("#yt-list tr[data-url-id]").forEach(tr => {
+    const id = tr.dataset.urlId;
+    $(".yt-action-retry", tr)?.addEventListener("click", async (e) => {
+      e.stopPropagation();
+      try {
+        await api(`/api/projects/${pid}/youtube/${id}/retry`, { method: "POST" });
+        fetchAndRenderYoutubeList(pid);
+      } catch (err) { alert("Retry failed: " + err.message); }
+    });
+    $(".yt-action-remove", tr)?.addEventListener("click", async (e) => {
+      e.stopPropagation();
+      if (!confirm("Remove this URL from the queue?")) return;
+      try {
+        await api(`/api/projects/${pid}/youtube/${id}`, { method: "DELETE" });
+        fetchAndRenderYoutubeList(pid);
+      } catch (err) { alert("Remove failed: " + err.message); }
+    });
+    $(".yt-action-priority", tr)?.addEventListener("click", async (e) => {
+      e.stopPropagation();
+      try {
+        await api(`/api/projects/${pid}/youtube/${id}/prioritize`, {
+          method: "POST", body: { priority: true },
+        });
+        fetchAndRenderYoutubeList(pid);
+        pollStatus();
+      } catch (err) { alert("Prioritize failed: " + err.message); }
+    });
+    $(".yt-action-unpriority", tr)?.addEventListener("click", async (e) => {
+      e.stopPropagation();
+      try {
+        await api(`/api/projects/${pid}/youtube/${id}/prioritize`, {
+          method: "POST", body: { priority: false },
+        });
+        fetchAndRenderYoutubeList(pid);
+      } catch (err) { alert("Unprioritize failed: " + err.message); }
+    });
+  });
+}
+
+async function submitYoutubeUrl(pid) {
+  const url = $("#yt-url-input").value.trim();
+  const mode = $("#yt-mode-select").value;
+  if (!url) return;
+  const btn = $("#yt-submit-btn");
+  btn.disabled = true;
+  try {
+    const res = await fetch(`/api/projects/${pid}/youtube`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ url, mode }),
+    });
+    const data = await res.json();
+    if (!res.ok || !data.ok) {
+      alert(data.message || data.error || `submit failed (${res.status})`);
+    } else {
+      $("#yt-url-input").value = "";
+      fetchAndRenderYoutubeList(pid);
+      pollStatus();
+    }
+  } catch (e) {
+    alert("Submit failed: " + e.message);
+  } finally {
+    btn.disabled = false;
+  }
+}
+
+async function toggleYoutube(pid, enable) {
+  if (!enable && !confirm(
+    "Disable YouTube ingest for this project?\n\n" +
+    "Already-queued URLs will keep processing. Disabling just hides the input."
+  )) return;
+  try {
+    await api(`/api/projects/${pid}`, {
+      method: "PATCH",
+      body: { youtube_enabled: enable },
+    });
+    pollStatus();
+  } catch (e) {
+    alert("Toggle failed: " + e.message);
+  }
+}
+
 // ---------- modals ----------
 
 function closeAllModals() {
@@ -629,6 +884,8 @@ function bindNewProjectHandlers() {
         vad: $("#np-vad").checked,
         no_context: $("#np-nocontext").checked,
       },
+      youtube_enabled: $("#np-youtube").checked,
+      youtube_default_mode: $("#np-youtube-mode").value,
     };
     if (!body.name) return alert("Name required");
     if (!body.folders.length) return alert("At least one folder required");

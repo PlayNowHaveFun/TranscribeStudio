@@ -104,13 +104,21 @@ cat <<EOF
                 or open the URL in any browser
 
   IMPORTANT — Full Disk Access:
-    macOS requires Full Disk Access for the app to read your videos
-    and write transcripts when run from launchd. Open:
+    macOS requires Full Disk Access so the app can read your videos
+    and write transcripts when launched by launchd. Open:
       System Settings → Privacy & Security → Full Disk Access
     Click + and add:
       - /bin/bash
       - $STUDIO/Transcribe Studio.app
     (already granted? you can ignore this)
+
+  NOTE — venv location:
+    The Python venv lives at:
+      ~/Library/Application Support/transcribe-studio/venv
+    (NOT in the project folder). This avoids macOS TCC blocking
+    Python at startup when launched by launchd. If you ever see
+    "PermissionError ... pyvenv.cfg" in logs/launchd.err.log,
+    run: ./migrate-venv.command
 
 ══════════════════════════════════════════════════════════════════════
 EOF

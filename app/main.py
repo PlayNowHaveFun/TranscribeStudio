@@ -142,6 +142,12 @@ def create_app() -> tuple[Flask, Registry, Worker]:
             exclude_patterns=body.get("exclude_patterns", []),
             ordering=body.get("ordering", "newest_first"),
             notes=body.get("notes", ""),
+            youtube_enabled=body.get("youtube_enabled", False),
+            youtube_default_mode=body.get("youtube_default_mode", "speech"),
+            youtube_subdir=body.get("youtube_subdir", "youtube"),
+            music_keep_vocals=body.get("music_keep_vocals", True),
+            music_force_no_context=body.get("music_force_no_context", True),
+            music_demucs_segment=body.get("music_demucs_segment", 0),
         )
         registry.add(proj)
         worker.wake()
@@ -244,6 +250,135 @@ def create_app() -> tuple[Flask, Registry, Worker]:
             state.mark_skipped(path)
         return jsonify({"ok": True})
 
+    # ----- YouTube ingest -----
+    # Decision #11: keep these JSON-clean and parameter-stable so the
+    # MCP server track can lift them as `transcribe-studio:add_youtube_url`
+    # etc. without reshaping the contract.
+
+    _ALLOWED_MODES = ("speech", "music")
+    _TERMINAL_URL_STATUSES = ("done", "failed")
+    _IN_FLIGHT_URL_STATUSES = ("downloading", "separating", "transcribing")
+
+    @app.route("/api/projects/<pid>/youtube", methods=["GET"])
+    def api_youtube_list(pid):
+        p = registry.get(pid)
+        if not p:
+            abort(404)
+        state = registry.state(pid)
+        return jsonify({"urls": state.list_urls()})
+
+    @app.route("/api/projects/<pid>/youtube", methods=["POST"])
+    def api_youtube_submit(pid):
+        p = registry.get(pid)
+        if not p:
+            abort(404)
+        if not p.youtube_enabled:
+            return jsonify({
+                "ok": False,
+                "error": "youtube_disabled",
+                "message": "Enable YouTube ingest in this project's settings first.",
+            }), 400
+        if not p.folders:
+            return jsonify({
+                "ok": False,
+                "error": "no_folders",
+                "message": "Project has no folders configured; YouTube downloads need somewhere to land.",
+            }), 400
+
+        body = request.get_json(force=True) or {}
+        url = (body.get("url") or "").strip()
+        mode = (body.get("mode") or p.youtube_default_mode).strip().lower()
+
+        if not url:
+            return jsonify({"ok": False, "error": "missing_url"}), 400
+        if not (url.startswith("http://") or url.startswith("https://")):
+            return jsonify({
+                "ok": False, "error": "invalid_url",
+                "message": "URL must start with http:// or https://",
+            }), 400
+        if mode not in _ALLOWED_MODES:
+            return jsonify({
+                "ok": False, "error": "invalid_mode",
+                "message": f"mode must be one of {_ALLOWED_MODES}",
+            }), 400
+
+        state = registry.state(pid)
+        row = state.add_url(url, mode)
+        worker.wake()
+        return jsonify({"ok": True, "url_row": row}), 201
+
+    @app.route("/api/projects/<pid>/youtube/<url_id>", methods=["DELETE"])
+    def api_youtube_remove(pid, url_id):
+        p = registry.get(pid)
+        if not p:
+            abort(404)
+        state = registry.state(pid)
+        row = state.get_url(url_id)
+        if not row:
+            abort(404)
+        if row.get("status") in _IN_FLIGHT_URL_STATUSES:
+            return jsonify({
+                "ok": False,
+                "error": "in_flight",
+                "message": (
+                    f"URL is currently {row['status']}; pause the worker first or wait "
+                    f"for the stage to complete before removing."
+                ),
+            }), 409
+        state.remove_url(url_id)
+        return jsonify({"ok": True})
+
+    @app.route("/api/projects/<pid>/youtube/<url_id>/prioritize", methods=["POST"])
+    def api_youtube_prioritize(pid, url_id):
+        """Mark a queued URL as 'up next' — it'll run before other queued rows.
+
+        Body (optional): {"priority": true|false}. Defaults to true.
+        Only works on `queued` rows; in-flight rows can't be reordered (the
+        worker has already committed to the current one).
+        """
+        p = registry.get(pid)
+        if not p:
+            abort(404)
+        state = registry.state(pid)
+        row = state.get_url(url_id)
+        if not row:
+            abort(404)
+        if row.get("status") != "queued":
+            return jsonify({
+                "ok": False,
+                "error": "not_queued",
+                "message": f"can only reorder queued rows; this one is '{row.get('status')}'",
+            }), 409
+        body = request.get_json(silent=True) or {}
+        priority = bool(body.get("priority", True))
+        updated = state.update_url(url_id, priority=priority)
+        worker.wake()
+        return jsonify({"ok": True, "url_row": updated})
+
+    @app.route("/api/projects/<pid>/youtube/<url_id>/retry", methods=["POST"])
+    def api_youtube_retry(pid, url_id):
+        p = registry.get(pid)
+        if not p:
+            abort(404)
+        state = registry.state(pid)
+        row = state.get_url(url_id)
+        if not row:
+            abort(404)
+        if row.get("status") != "failed":
+            return jsonify({
+                "ok": False,
+                "error": "not_failed",
+                "message": f"can only retry failed rows; this one is '{row.get('status')}'",
+            }), 409
+        updated = state.update_url(
+            url_id,
+            status="queued", stage=None,
+            failed_reason=None,
+            started_at=None, finished_at=None,
+        )
+        worker.wake()
+        return jsonify({"ok": True, "url_row": updated})
+
     # ----- engine info (models, etc.) -----
     @app.route("/api/engine")
     def api_engine():
@@ -284,6 +419,17 @@ def _summary(p: Project, registry: Registry) -> dict:
     for r in rows:
         counts[r["status"]] = counts.get(r["status"], 0) + 1
     total = len(rows)
+
+    # YouTube inbox summary — count by status so the UI can render a
+    # badge without fetching the full list. Order chosen to match the
+    # row lifecycle for easy "where in pipeline" debugging.
+    yt_counts = {"queued": 0, "downloading": 0, "separating": 0,
+                 "transcribing": 0, "done": 0, "failed": 0}
+    for row in state.list_urls():
+        s = row.get("status")
+        if s in yt_counts:
+            yt_counts[s] += 1
+
     return {
         "id": p.id,
         "name": p.name,
@@ -299,6 +445,11 @@ def _summary(p: Project, registry: Registry) -> dict:
         "progress": (counts["completed"] / total) if total else 0,
         "folders": p.folders,
         "required_volumes": p.required_volumes,
+        # YouTube ingest
+        "youtube_enabled": p.youtube_enabled,
+        "youtube_default_mode": p.youtube_default_mode,
+        "youtube_counts": yt_counts,
+        "youtube_total": sum(yt_counts.values()),
     }
 
 
