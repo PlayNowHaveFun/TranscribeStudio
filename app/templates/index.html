@@ -1,0 +1,120 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Transcribe Studio</title>
+  <link rel="stylesheet" href="/static/style.css" />
+</head>
+<body>
+  <div id="app">
+    <aside class="sidebar">
+      <div class="brand">
+        <h1>Transcribe<span>Studio</span></h1>
+      </div>
+
+      <nav class="projects" id="project-nav">
+        <button class="nav-item active" data-view="dashboard">
+          <span class="dot"></span>
+          <span class="label">All projects</span>
+        </button>
+        <!-- project items injected here -->
+      </nav>
+
+      <button class="add-project" id="add-project-btn">＋ New project</button>
+
+      <div class="sidebar-footer">
+        <div class="status-pill" id="agent-pill">
+          <span class="status-dot"></span>
+          <span class="status-text">connecting…</span>
+        </div>
+        <div class="muted small" id="port-info"></div>
+      </div>
+    </aside>
+
+    <main class="main">
+      <!-- Dashboard / project view rendered here -->
+      <div id="content"></div>
+    </main>
+  </div>
+
+  <!-- New project modal -->
+  <div class="modal-backdrop" id="new-project-modal" hidden>
+    <div class="modal">
+      <h2>New project</h2>
+      <p class="muted small">A project bundles one or more folders and the whisper settings used to transcribe them.</p>
+
+      <label>Name
+        <input id="np-name" type="text" placeholder="e.g. Music Lessons" />
+      </label>
+
+      <label>Folders <span class="muted small">(one absolute path per line)</span>
+        <textarea id="np-folders" rows="3" placeholder="/Users/you/Documents/Music
+/Volumes/Drive/Music"></textarea>
+      </label>
+
+      <div class="row">
+        <label>Model
+          <select id="np-model"></select>
+        </label>
+        <label>Language
+          <select id="np-language">
+            <option value="auto">auto-detect</option>
+            <option value="en">English (en)</option>
+            <option value="hi">Hindi (hi)</option>
+            <option value="es">Spanish (es)</option>
+            <option value="fr">French (fr)</option>
+            <option value="de">German (de)</option>
+            <option value="ja">Japanese (ja)</option>
+            <option value="zh">Chinese (zh)</option>
+          </select>
+        </label>
+      </div>
+
+      <div class="row">
+        <label class="check"><input type="checkbox" id="np-translate" /> Translate to English</label>
+        <label class="check"><input type="checkbox" id="np-vad" checked /> VAD (recommended)</label>
+        <label class="check"><input type="checkbox" id="np-autorun" checked /> Auto-run</label>
+      </div>
+
+      <details>
+        <summary>Advanced</summary>
+        <div class="row">
+          <label class="check"><input type="checkbox" id="np-nocontext" /> --no-context (anti-loop)</label>
+          <label class="check"><input type="checkbox" id="np-acpower" checked /> Require AC power</label>
+        </div>
+        <label>Required volumes <span class="muted small">(absolute paths, one per line)</span>
+          <textarea id="np-volumes" rows="2" placeholder="/Volumes/MyDrive"></textarea>
+        </label>
+        <label>Exclude patterns <span class="muted small">(globs, one per line)</span>
+          <textarea id="np-excludes" rows="2" placeholder="test_*
+*_draft.mov"></textarea>
+        </label>
+      </details>
+
+      <div class="modal-actions">
+        <button class="btn-secondary" id="np-cancel">Cancel</button>
+        <button class="btn-primary" id="np-create">Create project</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Transcript viewer modal -->
+  <div class="modal-backdrop" id="transcript-modal" hidden>
+    <div class="modal modal-lg">
+      <div class="modal-header">
+        <h2 id="tx-filename">Transcript</h2>
+        <button class="modal-close" id="tx-close">×</button>
+      </div>
+      <div id="tx-quality"></div>
+      <pre id="tx-content" class="transcript-pre"></pre>
+      <div class="modal-actions">
+        <button class="btn-secondary" id="tx-retranscribe">Re-transcribe</button>
+        <button class="btn-secondary" id="tx-finder">Show in Finder</button>
+      </div>
+    </div>
+  </div>
+
+  <script src="/static/app.js"></script>
+</body>
+</html>

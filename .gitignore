@@ -1,0 +1,25 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+
+# Virtualenv
+venv/
+
+# macOS
+.DS_Store
+
+# Runtime state — user data, not source
+data/
+logs/
+
+# Editor
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# Local model cache, ad-hoc scratch
+*.bin
+.scratch/
