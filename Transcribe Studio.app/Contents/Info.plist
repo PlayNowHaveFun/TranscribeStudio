@@ -24,5 +24,13 @@
   <false/>
   <key>NSHighResolutionCapable</key>
   <true/>
+  <key>NSDocumentsFolderUsageDescription</key>
+  <string>Transcribe Studio reads your audio/video files from Documents to transcribe them and writes transcripts alongside them.</string>
+  <key>NSDownloadsFolderUsageDescription</key>
+  <string>Transcribe Studio reads downloaded media files to transcribe them.</string>
+  <key>NSDesktopFolderUsageDescription</key>
+  <string>Transcribe Studio reads media files on your Desktop to transcribe them.</string>
+  <key>NSRemovableVolumesUsageDescription</key>
+  <string>Transcribe Studio reads media from external drives (e.g. project archives) to transcribe them.</string>
 </dict>
 </plist>
