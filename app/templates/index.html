@@ -101,6 +101,22 @@
         </label>
       </details>
 
+      <details>
+        <summary>AI Analysis (Ollama)</summary>
+        <label class="check" style="margin-top:8px;">
+          <input type="checkbox" id="np-ollama-enabled" />
+          Enable transcript analysis after each transcription
+        </label>
+        <label style="margin-top:8px;">Model
+          <select id="np-ollama-model">
+            <option value="qwen2.5-coder:14b">qwen2.5-coder:14b (installed)</option>
+            <option value="qwen2.5-coder:7b">qwen2.5-coder:7b (installed)</option>
+            <option value="qwen2.5-coder:3b">qwen2.5-coder:3b (installed)</option>
+          </select>
+          <span class="muted small" id="np-ollama-status">Requires Ollama at localhost:11434</span>
+        </label>
+      </details>
+
       <div class="modal-actions">
         <button class="btn-secondary" id="np-cancel">Cancel</button>
         <button class="btn-primary" id="np-create">Create project</button>
@@ -116,7 +132,17 @@
         <button class="modal-close" id="tx-close">×</button>
       </div>
       <div id="tx-quality"></div>
-      <pre id="tx-content" class="transcript-pre"></pre>
+      <!-- Tab bar: Transcript | Analysis -->
+      <div class="modal-tabs" id="tx-tabs">
+        <button class="modal-tab active" data-tab="transcript">Transcript</button>
+        <button class="modal-tab" data-tab="analysis">Analysis</button>
+      </div>
+      <!-- Transcript panel -->
+      <div id="tx-transcript-panel">
+        <pre id="tx-content" class="transcript-pre"></pre>
+      </div>
+      <!-- Analysis panel (populated by JS after fetch) -->
+      <div id="tx-analysis-panel" style="display:none"></div>
       <div class="modal-actions">
         <button class="btn-secondary" id="tx-retranscribe">Re-transcribe</button>
         <button class="btn-secondary" id="tx-finder">Show in Finder</button>

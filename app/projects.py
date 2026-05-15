@@ -24,6 +24,27 @@ PROJECTS_FILE = DATA_DIR / "projects.json"
 
 
 # --------------------------------------------------------------------------
+# Ollama config (per-project AI analysis settings)
+# --------------------------------------------------------------------------
+
+@dataclass
+class OllamaConfig:
+    """Settings for optional local-LLM transcript analysis via Ollama.
+
+    >>> LOCAL LLM INTEGRATION POINT <<<
+    When enabled, after each transcription the worker sends the .txt to
+    the configured Ollama model (default: qwen2.5-coder:14b) and writes
+    a .analysis.json sidecar with summary + topics.
+
+    All fields default to off so existing projects load unchanged.
+    """
+    enabled: bool = False
+    model: str = "qwen2.5-coder:14b"   # matches what's installed via `ollama list`
+    analyses: list = field(default_factory=lambda: ["summary", "topics"])
+    base_url: str = "http://localhost:11434"
+
+
+# --------------------------------------------------------------------------
 # Project dataclass
 # --------------------------------------------------------------------------
 
@@ -50,9 +71,13 @@ class Project:
     music_force_no_context: bool = True        # apply --no-context for music-mode transcription
     music_demucs_segment: int = 0              # 0 = no segmenting; raise to 7 if OOM on long tracks
 
+    # --- Ollama AI analysis (local LLM post-processing) ---
+    ollama: OllamaConfig = field(default_factory=OllamaConfig)
+
     def to_dict(self) -> dict:
         d = asdict(self)
         d["config"] = {**asdict(self.config), "formats": list(self.config.formats)}
+        d["ollama"] = asdict(self.ollama)
         return d
 
     @classmethod
@@ -60,6 +85,14 @@ class Project:
         cfg_d = d.get("config", {})
         cfg_d["formats"] = tuple(cfg_d.get("formats", ("txt", "srt")))
         cfg = WhisperConfig(**cfg_d)
+        # OllamaConfig — .get() with {} default so old projects.json loads unchanged
+        ollama_d = d.get("ollama", {})
+        ollama_cfg = OllamaConfig(
+            enabled=ollama_d.get("enabled", False),
+            model=ollama_d.get("model", "qwen2.5-coder:14b"),
+            analyses=ollama_d.get("analyses", ["summary", "topics"]),
+            base_url=ollama_d.get("base_url", "http://localhost:11434"),
+        )
         return cls(
             id=d["id"],
             name=d["name"],
@@ -72,13 +105,14 @@ class Project:
             ordering=d.get("ordering", "newest_first"),
             created_at=d.get("created_at", datetime.now().isoformat()),
             notes=d.get("notes", ""),
-            # New YouTube fields — .get() with defaults so old projects.json loads unchanged
+            # YouTube fields — .get() with defaults so old projects.json loads unchanged
             youtube_enabled=d.get("youtube_enabled", False),
             youtube_default_mode=d.get("youtube_default_mode", "speech"),
             youtube_subdir=d.get("youtube_subdir", "youtube"),
             music_keep_vocals=d.get("music_keep_vocals", True),
             music_force_no_context=d.get("music_force_no_context", True),
             music_demucs_segment=d.get("music_demucs_segment", 0),
+            ollama=ollama_cfg,
         )
 
     @property
