@@ -24,6 +24,7 @@ const state = {
   status: null,
   view: "dashboard",
   selectedProjectId: null,
+  sourceTab: "local",          // "local" | "youtube" | "music" — active source-type tab
   filters: { search: "", status: "all" },
   rendered: { view: null, projectId: null },  // what's currently in the DOM
   fileListLastFetchedFor: null,
@@ -311,6 +312,7 @@ function renderProjectStructure() {
           </select>
         </div>
       </div>
+      <div id="source-tabs-bar"></div>
       <div id="file-list"><div class="muted">Loading…</div></div>
     </div>
   `;
@@ -487,20 +489,68 @@ async function fetchAndRenderFileList(pid) {
   } catch (e) { /* keep old list */ }
 }
 
+function renderSourceTabsInto(containerId) {
+  const el = $("#" + containerId);
+  if (!el) return;
+  const all = fileListCache;
+  const localCount  = all.filter(f => f.source === "folder").length;
+  const ytCount     = all.filter(f => f.source === "youtube" && f.youtube_mode !== "music").length;
+  const musicCount  = all.filter(f => f.source === "youtube" && f.youtube_mode === "music").length;
+  const tabs = [
+    { key: "local",   label: "Local Files", count: localCount  },
+    { key: "youtube", label: "YouTube",      count: ytCount     },
+    { key: "music",   label: "Music",        count: musicCount  },
+  ];
+  el.innerHTML = `<div class="source-tabs">${tabs.map(t => `
+    <button class="source-tab-btn${state.sourceTab === t.key ? " active" : ""}" data-tab="${t.key}">
+      ${t.label} <span class="tab-count">${t.count}</span>
+    </button>`).join("")}</div>`;
+  el.querySelectorAll(".source-tab-btn").forEach(btn => {
+    btn.onclick = () => {
+      state.sourceTab = btn.dataset.tab;
+      renderFileListFromCache();
+    };
+  });
+}
+
 function renderFileListFromCache() {
   const list = $("#file-list");
   if (!list) return;
+
+  // Render/update the source-type tab bar
+  renderSourceTabsInto("source-tabs-bar");
+
+  // Filter by active source tab first
   let rows = fileListCache;
+  if (state.sourceTab === "local") {
+    rows = rows.filter(r => r.source === "folder");
+  } else if (state.sourceTab === "youtube") {
+    rows = rows.filter(r => r.source === "youtube" && r.youtube_mode !== "music");
+  } else if (state.sourceTab === "music") {
+    rows = rows.filter(r => r.source === "youtube" && r.youtube_mode === "music");
+  }
+
+  // Then apply search/status filters
   if (state.filters.status !== "all") {
     rows = rows.filter(r => r.status === state.filters.status);
   }
   if (state.filters.search) {
     rows = rows.filter(r => r.name.toLowerCase().includes(state.filters.search));
   }
+
   if (rows.length === 0) {
     list.innerHTML = `<div class="empty-state">No files match.</div>`;
     return;
   }
+
+  // Music tab → music cards with audio players
+  if (state.sourceTab === "music") {
+    list.innerHTML = rows.map(f => renderMusicCard(f)).join("");
+    bindMusicCardHandlers();
+    return;
+  }
+
+  // Local / YouTube tabs → file table (existing layout)
   list.innerHTML = `<table class="file-table">
     <thead><tr>
       <th>File</th><th>Folder</th><th>Size</th><th>Modified</th><th>Status</th><th></th>
@@ -508,6 +558,70 @@ function renderFileListFromCache() {
     <tbody>${rows.map(fileRow).join("")}</tbody>
   </table>`;
   bindFileRowHandlers();
+}
+
+function renderMusicCard(file) {
+  const job = youtubeListCache.find(u => u.folder === file.folder);
+  const title = job?.title || file.name;
+  const instrPath = file.folder ? file.folder + "/instrumental.mp3" : null;
+  const pid = state.selectedProjectId;
+  const statusBadgeHtml = {
+    completed:   `<span class="badge badge-done">done</span>`,
+    pending:     `<span class="badge badge-pending">pending</span>`,
+    in_progress: `<span class="badge badge-progress">transcribing…</span>`,
+    queued:      `<span class="badge badge-queued">queued</span>`,
+    failed:      `<span class="badge badge-failed">failed</span>`,
+    skipped:     `<span class="badge badge-skipped">skipped</span>`,
+  }[file.status] || `<span class="badge badge-pending">${escapeHtml(file.status)}</span>`;
+
+  const audioPlayers = file.status === "completed" ? `
+    <div class="audio-row">
+      <span class="audio-label">Vocals</span>
+      <audio controls src="/api/audio?path=${encodeURIComponent(file.path)}"></audio>
+    </div>
+    <div class="audio-row">
+      <span class="audio-label">Instrumental</span>
+      <audio controls src="/api/audio?path=${encodeURIComponent(instrPath)}"></audio>
+    </div>` : `<div style="margin-top:8px">${statusBadgeHtml}</div>`;
+
+  return `<div class="music-card" data-path="${escapeAttr(file.path)}">
+    <div class="music-card-header">
+      <div>
+        <div class="music-card-title">${escapeHtml(title)}</div>
+        <div class="music-card-meta">${escapeHtml(file.name)} · ${fmt.bytes(file.size_bytes)}</div>
+      </div>
+      <span class="badge badge-music">♪ Music</span>
+    </div>
+    ${audioPlayers}
+    <div class="music-card-actions">
+      ${file.has_transcript
+        ? `<button class="btn-secondary mc-view" data-path="${escapeAttr(file.path)}" data-pid="${escapeAttr(pid)}" style="font-size:12px;padding:4px 10px;">View lyrics</button>`
+        : ""}
+      ${file.status === "pending"
+        ? `<button class="btn-icon mc-priority" data-path="${escapeAttr(file.path)}" title="Move to front of queue">↑</button>`
+        : ""}
+      ${file.has_transcript
+        ? `<button class="btn-icon mc-redo" data-path="${escapeAttr(file.path)}" title="Re-transcribe">redo</button>`
+        : ""}
+    </div>
+  </div>`;
+}
+
+function bindMusicCardHandlers() {
+  const pid = state.selectedProjectId;
+  $$("#file-list .music-card[data-path]").forEach(card => {
+    const path = card.dataset.path;
+    $(".mc-view", card)?.addEventListener("click", e => { e.stopPropagation(); openTranscript(pid, path); });
+    $(".mc-priority", card)?.addEventListener("click", e => {
+      e.stopPropagation();
+      api(`/api/projects/${pid}/prioritize`, { method: "POST", body: { paths: [path] } });
+    });
+    $(".mc-redo", card)?.addEventListener("click", e => {
+      e.stopPropagation();
+      if (!confirm("Re-transcribe? The existing transcript will be deleted.")) return;
+      api(`/api/projects/${pid}/retranscribe`, { method: "POST", body: { paths: [path] } });
+    });
+  });
 }
 
 function fileRow(r) {
@@ -809,14 +923,47 @@ function openModal(id) {
   $("#" + id).hidden = false;
 }
 
+// Per-open state for the transcript modal (used by the Narrative tab).
+const txModalState = { pid: null, path: null, transcriptLoaded: false };
+
 async function openTranscript(pid, path) {
   openModal("transcript-modal");
   $("#tx-filename").textContent = path.split("/").pop();
   $("#tx-quality").innerHTML = "";
   $("#tx-content").textContent = "Loading…";
+  $("#tx-analysis-panel").innerHTML = "";
+
+  txModalState.pid = pid;
+  txModalState.path = path;
+  txModalState.transcriptLoaded = false;
+  resetNarrativePane();
+
+  // Three-panel tab switching (Transcript | Analysis | Narrative).
+  // Panel ids follow the pattern tx-<tab>-panel; data-tab matches.
+  const tabs = $$("#tx-tabs .modal-tab");
+  const panels = {
+    transcript: $("#tx-transcript-panel"),
+    analysis:   $("#tx-analysis-panel"),
+    narrative:  $("#tx-narrative-panel"),
+  };
+  tabs.forEach(btn => {
+    btn.onclick = () => {
+      tabs.forEach(b => b.classList.remove("active"));
+      btn.classList.add("active");
+      Object.entries(panels).forEach(([key, el]) => {
+        if (el) el.style.display = (key === btn.dataset.tab) ? "" : "none";
+      });
+      // Narrative tab: try to pre-load any cached narrative for the current style.
+      if (btn.dataset.tab === "narrative") tryLoadCachedNarrative();
+    };
+  });
+  // Reset to transcript tab
+  tabs[0]?.click();
 
   try {
     const data = await api(`/api/projects/${pid}/transcript?path=${encodeURIComponent(path)}`);
+
+    // Quality banner
     const qual = data.quality;
     let qualHtml = "";
     if (qual && qual.warnings && qual.warnings.length) {
@@ -827,9 +974,19 @@ async function openTranscript(pid, path) {
       </div>`;
     }
     $("#tx-quality").innerHTML = qualHtml;
+
+    // Transcript text
     $("#tx-content").textContent = data.txt && data.txt.trim()
       ? data.txt
       : "(this file hasn't been transcribed yet — close this and use ↑ to prioritize it)";
+    txModalState.transcriptLoaded = !!(data.txt && data.txt.trim());
+
+    // Analysis panel content (Ollama)
+    panels.analysis.innerHTML = renderAnalysisPanel(data.analysis, pid, path);
+    bindAnalysisPanelHandlers(pid, path);
+
+    // Narrative tab handlers (Opus). Bound once per modal open.
+    bindNarrativeTabHandlers();
 
     $("#tx-retranscribe").onclick = async () => {
       if (!confirm("Re-transcribe this file? The existing transcript will be deleted.")) return;
@@ -845,8 +1002,211 @@ async function openTranscript(pid, path) {
   }
 }
 
+// ---------- Narrative tab (Claude Opus 4.7) ----------
+
+function resetNarrativePane() {
+  $("#tx-narrate-status").textContent = "";
+  $("#tx-narrate-regen").hidden = true;
+  $("#tx-scaffold-body").hidden = true;
+  $("#tx-scaffold-body").innerHTML = "";
+  $("#tx-narrative-body").innerHTML = `<div class="muted small">
+    No narrative yet for this style. Click <strong>Generate</strong> to send the transcript to Claude Opus 4.7.
+    Requires <code>ANTHROPIC_API_KEY</code> exported in the environment.
+  </div>`;
+}
+
+function bindNarrativeTabHandlers() {
+  $("#tx-narrative-style").onchange = () => {
+    resetNarrativePane();
+    tryLoadCachedNarrative();
+  };
+  $("#tx-narrate-btn").onclick = () => generateNarrative({ force: false });
+  $("#tx-narrate-regen").onclick = () => {
+    if (!confirm("Regenerate? This sends the transcript to Claude Opus 4.7 again and overwrites the cached output for this style.")) return;
+    generateNarrative({ force: true });
+  };
+}
+
+async function tryLoadCachedNarrative() {
+  const { pid, path } = txModalState;
+  if (!pid || !path) return;
+  const style = $("#tx-narrative-style").value;
+  try {
+    const data = await api(
+      `/api/projects/${pid}/narrative?path=${encodeURIComponent(path)}&style=${encodeURIComponent(style)}`
+    );
+    renderNarrativeResult(data);
+    $("#tx-narrate-status").textContent = "cached";
+  } catch (e) {
+    // 404 is expected if no narrative cached yet — leave the empty prompt in place.
+  }
+}
+
+async function generateNarrative({ force }) {
+  const { pid, path, transcriptLoaded } = txModalState;
+  if (!pid || !path) return;
+  if (!transcriptLoaded) {
+    alert("Transcribe this file first — there's no .txt yet.");
+    return;
+  }
+  const style = $("#tx-narrative-style").value;
+  const btn = $("#tx-narrate-btn");
+  const regen = $("#tx-narrate-regen");
+  const status = $("#tx-narrate-status");
+  btn.disabled = true; regen.disabled = true;
+  status.textContent = force ? "regenerating… (30–90s)" : "generating… (30–90s)";
+  try {
+    const res = await fetch(`/api/projects/${pid}/narrate`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ path, style, force }),
+    });
+    const data = await res.json();
+    if (!res.ok || !data.ok) {
+      status.textContent = "";
+      alert(data.message || data.error || `narrate failed (${res.status})`);
+      return;
+    }
+    renderNarrativeResult(data);
+    status.textContent = data.cached ? "cached" : "generated";
+  } catch (e) {
+    status.textContent = "";
+    alert("Generate failed: " + e.message);
+  } finally {
+    btn.disabled = false; regen.disabled = false;
+  }
+}
+
+function renderNarrativeResult(data) {
+  // Scaffold pane: render structured fields if present.
+  const s = data.scaffold || {};
+  const parts = [];
+  if (s.summary_one_line) {
+    parts.push(`<p class="scaffold-summary">${escapeHtml(s.summary_one_line)}</p>`);
+  }
+  if (Array.isArray(s.themes) && s.themes.length) {
+    parts.push(`<section><h4>Themes</h4><div class="tag-row">${
+      s.themes.map(t => `<span class="topic-pill">${escapeHtml(t)}</span>`).join("")
+    }</div></section>`);
+  }
+  if (Array.isArray(s.characters) && s.characters.length) {
+    parts.push(`<section><h4>Characters</h4><ul>${
+      s.characters.map(c => `<li><strong>${escapeHtml(c.name || "?")}</strong>${
+        c.role ? ` <span class="muted small">(${escapeHtml(c.role)})</span>` : ""
+      }${c.description ? ` — ${escapeHtml(c.description)}` : ""}</li>`).join("")
+    }</ul></section>`);
+  }
+  if (s.emotional_arc) {
+    parts.push(`<section><h4>Emotional arc</h4><p>${escapeHtml(s.emotional_arc)}</p></section>`);
+  }
+  if (Array.isArray(s.story_beats) && s.story_beats.length) {
+    parts.push(`<section><h4>Story beats</h4><ol>${
+      s.story_beats.map(b => `<li><strong>${escapeHtml(b.moment || "")}</strong>${
+        b.significance ? ` — ${escapeHtml(b.significance)}` : ""
+      }</li>`).join("")
+    }</ol></section>`);
+  }
+  if (Array.isArray(s.notable_quotes) && s.notable_quotes.length) {
+    parts.push(`<section><h4>Notable quotes</h4>${
+      s.notable_quotes.map(q => `<blockquote>"${escapeHtml(q.quote || "")}"${
+        (q.context || q.why_resonant)
+          ? `<div class="muted small">${[q.context, q.why_resonant].filter(Boolean).map(escapeHtml).join(" — ")}</div>`
+          : ""
+      }</blockquote>`).join("")
+    }</section>`);
+  }
+  const scaffoldEl = $("#tx-scaffold-body");
+  scaffoldEl.innerHTML = parts.length
+    ? `<details class="scaffold-details" open><summary>Scaffold (themes, beats, characters)</summary>${parts.join("")}</details>`
+    : "";
+  scaffoldEl.hidden = parts.length === 0;
+
+  // Narrative pane: render the Markdown loosely.
+  $("#tx-narrative-body").innerHTML = renderLooseMarkdown(data.narrative || "");
+  $("#tx-narrate-regen").hidden = false;
+}
+
+// Minimal Markdown-ish renderer: paragraphs, # / ## / ### headings, **bold**, *italic*.
+function renderLooseMarkdown(md) {
+  if (!md) return "";
+  const esc = escapeHtml(md);
+  const blocks = esc.split(/\n{2,}/);
+  return blocks.map(block => {
+    const trimmed = block.trim();
+    if (!trimmed) return "";
+    const h = trimmed.match(/^(#{1,3})\s+(.+)$/);
+    if (h) {
+      const level = h[1].length + 1; // # → h2, ## → h3, ### → h4
+      return `<h${level}>${applyInline(h[2])}</h${level}>`;
+    }
+    return `<p>${applyInline(trimmed.replace(/\n/g, "<br/>"))}</p>`;
+  }).join("");
+}
+
+function applyInline(s) {
+  return s
+    .replace(/\*\*(.+?)\*\*/g, "<strong>$1</strong>")
+    .replace(/\*(.+?)\*/g, "<em>$1</em>");
+}
+
+function renderAnalysisPanel(analysis, pid, path) {
+  if (!analysis) {
+    return `<div class="analysis-empty">
+      <div class="muted">No analysis yet.</div>
+      <button class="analyze-btn" id="btn-analyze">
+        ✦ Analyze with qwen2.5-coder
+      </button>
+    </div>`;
+  }
+  const topicsHtml = (analysis.topics || []).length
+    ? `<div class="topics-row">${analysis.topics.map(t => `<span class="topic-pill">${escapeHtml(t)}</span>`).join("")}</div>`
+    : "";
+  const summaryHtml = analysis.summary
+    ? `<div class="analysis-summary">${escapeHtml(analysis.summary)}</div>`
+    : "";
+  const errorHtml = analysis.error
+    ? `<div class="warning-banner" style="margin-top:8px;">${escapeHtml(analysis.error)}</div>`
+    : "";
+  return `<div class="analysis-panel">
+    ${summaryHtml}
+    ${topicsHtml}
+    ${errorHtml}
+    <div class="analysis-meta">
+      Analyzed with <strong>${escapeHtml(analysis.model)}</strong>
+      · ${(analysis.word_count || 0).toLocaleString()} words
+      · ${analysis.analyzed_at ? new Date(analysis.analyzed_at).toLocaleString() : ""}
+    </div>
+    <div style="margin-top:12px;">
+      <button class="analyze-btn" id="btn-analyze" style="font-size:12px;padding:5px 12px;">
+        Re-analyze
+      </button>
+    </div>
+  </div>`;
+}
+
+function bindAnalysisPanelHandlers(pid, path) {
+  const btn = $("#btn-analyze");
+  if (!btn) return;
+  btn.onclick = async () => {
+    btn.disabled = true;
+    btn.textContent = "Analyzing…";
+    try {
+      // >>> LOCAL LLM CALL — sends this transcript to qwen2.5-coder:14b <<<
+      await api(`/api/projects/${pid}/analyze`, { method: "POST", body: { path } });
+      // Reload the modal with fresh analysis
+      await openTranscript(pid, path);
+    } catch (e) {
+      btn.disabled = false;
+      btn.textContent = "✦ Analyze with qwen2.5-coder";
+      alert("Analysis failed: " + e.message);
+    }
+  };
+}
+
 async function openNewProjectModal() {
   openModal("new-project-modal");
+
+  // Whisper models
   const eng = await api("/api/engine");
   const select = $("#np-model");
   select.innerHTML = "";
@@ -863,6 +1223,25 @@ async function openNewProjectModal() {
       if (m.name === "ggml-large-v3.bin") opt.selected = true;
       select.appendChild(opt);
     });
+  }
+
+  // >>> LOCAL LLM QUERY — check if Ollama is running and list models <<<
+  // Populates the AI Analysis model dropdown with installed Ollama models.
+  try {
+    const ollamaData = await api("/api/ollama/models");
+    const ollamaSelect = $("#np-ollama-model");
+    const statusEl = $("#np-ollama-status");
+    if (ollamaData.running && ollamaData.models.length) {
+      ollamaSelect.innerHTML = ollamaData.models.map(m =>
+        `<option value="${escapeAttr(m)}"${m === "qwen2.5-coder:14b" ? " selected" : ""}>${escapeHtml(m)}</option>`
+      ).join("");
+      if (statusEl) statusEl.textContent = `${ollamaData.models.length} model${ollamaData.models.length===1?"":"s"} available`;
+    } else {
+      if (statusEl) statusEl.textContent = "Ollama not running — start it to enable analysis";
+    }
+  } catch (e) {
+    const statusEl = $("#np-ollama-status");
+    if (statusEl) statusEl.textContent = "Could not reach Ollama";
   }
 }
 
@@ -886,6 +1265,12 @@ function bindNewProjectHandlers() {
       },
       youtube_enabled: $("#np-youtube").checked,
       youtube_default_mode: $("#np-youtube-mode").value,
+      ollama: {
+        enabled: $("#np-ollama-enabled").checked,
+        model: $("#np-ollama-model").value || "qwen2.5-coder:14b",
+        analyses: ["summary", "topics"],
+        base_url: "http://localhost:11434",
+      },
     };
     if (!body.name) return alert("Name required");
     if (!body.folders.length) return alert("At least one folder required");

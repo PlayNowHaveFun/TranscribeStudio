@@ -236,6 +236,9 @@ class Worker:
                     state.mark_completed(path, duration_sec=event.payload.get("duration_sec", 0))
                     self._close_url_for_target(state, path, status="done")
                     self._log(f"DONE  [{project.id}] {path}")
+                    # >>> LOCAL LLM CALL — trigger Ollama analysis if enabled <<<
+                    # qwen2.5-coder:14b reads the .txt and writes .analysis.json
+                    self._maybe_analyze(project, config_for_run, path)
                 elif event.phase == "fail":
                     reason = event.payload.get("reason", "unknown")
                     state.mark_failed(path, reason)
@@ -432,3 +435,33 @@ class Worker:
             if row.get("target_file") == path and row.get("mode") == "music":
                 return True
         return False
+
+    def _maybe_analyze(self, project: Project, config, path: str) -> None:
+        """Run Ollama analysis on the completed transcript if the project has it enabled.
+
+        >>> LOCAL LLM INTEGRATION POINT <<<
+        When project.ollama.enabled is True, this sends the .txt transcript to
+        qwen2.5-coder:14b (or whichever model is configured) and writes a
+        .analysis.json sidecar. The worker streams analysis Events to _current_event
+        so the UI shows "analyzing…" in the live status panel.
+
+        No-op if ollama is disabled (default) — zero overhead for existing projects.
+        """
+        if not project.ollama.enabled or not project.ollama.model:
+            return
+        from .engine import Engine as _Engine
+        tx_path = _Engine.transcript_path_for(Path(path), config, "txt")
+        if not tx_path.exists():
+            return
+        self._log(f"ANALYZE_START [{project.id}] {tx_path.name} model={project.ollama.model}")
+        from .analyzer import analyze_transcript
+        try:
+            for ev in analyze_transcript(tx_path, project.ollama.model, project.ollama.analyses):
+                with self._lock:
+                    self._current_event = ev
+                if ev.phase == "analyze_done":
+                    self._log(f"ANALYZE_DONE [{project.id}] {tx_path.name}")
+                elif ev.phase == "fail":
+                    self._log(f"ANALYZE_FAIL [{project.id}] {tx_path.name} ({ev.payload.get('reason')})")
+        except Exception as e:
+            self._log(f"ANALYZE_ERR [{project.id}] {tx_path.name} ({e})")
