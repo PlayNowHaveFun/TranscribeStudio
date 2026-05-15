@@ -18,6 +18,7 @@ from pathlib import Path
 from flask import Flask, jsonify, request, render_template, send_file, abort
 
 from . import conditions
+from . import narrate as narrate_mod
 from .engine import (
     Engine, WhisperConfig, KNOWN_MODELS, ALL_EXT, detect_hallucinations,
 )
@@ -131,6 +132,14 @@ def create_app() -> tuple[Flask, Registry, Worker]:
         cfg_dict.setdefault("language", "auto")
         cfg_dict.setdefault("translate_to_english", False)
         cfg_dict["formats"] = tuple(cfg_dict.get("formats", ("txt", "srt")))
+        from .projects import OllamaConfig
+        ollama_d = body.get("ollama", {})
+        ollama_cfg = OllamaConfig(
+            enabled=ollama_d.get("enabled", False),
+            model=ollama_d.get("model", "qwen2.5-coder:14b"),
+            analyses=ollama_d.get("analyses", ["summary", "topics"]),
+            base_url=ollama_d.get("base_url", "http://localhost:11434"),
+        )
         proj = Project(
             id=pid,
             name=body["name"],
@@ -142,6 +151,13 @@ def create_app() -> tuple[Flask, Registry, Worker]:
             exclude_patterns=body.get("exclude_patterns", []),
             ordering=body.get("ordering", "newest_first"),
             notes=body.get("notes", ""),
+            youtube_enabled=body.get("youtube_enabled", False),
+            youtube_default_mode=body.get("youtube_default_mode", "speech"),
+            youtube_subdir=body.get("youtube_subdir", "youtube"),
+            music_keep_vocals=body.get("music_keep_vocals", True),
+            music_force_no_context=body.get("music_force_no_context", True),
+            music_demucs_segment=body.get("music_demucs_segment", 0),
+            ollama=ollama_cfg,
         )
         registry.add(proj)
         worker.wake()
@@ -177,7 +193,7 @@ def create_app() -> tuple[Flask, Registry, Worker]:
         if not p:
             abort(404)
         state = registry.state(pid)
-        rows = annotate_with_state(scan_project(p), state)
+        rows = annotate_with_state(scan_project(p, state), state)
         rows = order_files(rows, p.ordering)
         return jsonify(rows)
 
@@ -197,11 +213,131 @@ def create_app() -> tuple[Flask, Registry, Worker]:
             out["txt"] = tx.read_text()
             out["txt_path"] = str(tx)
             out["quality"] = detect_hallucinations(tx)
+            # Include Ollama analysis sidecar if it exists
+            analysis_path = tx.with_suffix(".analysis.json")
+            if analysis_path.exists():
+                try:
+                    out["analysis"] = json.loads(analysis_path.read_text())
+                except Exception:
+                    out["analysis"] = None
+            else:
+                out["analysis"] = None
         else:
             out["txt"] = None
+            out["analysis"] = None
         if srt.exists():
             out["srt_path"] = str(srt)
         return jsonify(out)
+
+    # ----- Ollama / local LLM routes -----
+
+    @app.route("/api/ollama/models")
+    def api_ollama_models():
+        """Return available Ollama models and whether the server is reachable.
+
+        >>> LOCAL LLM QUERY — asks qwen2.5-coder:14b's Ollama server for installed models <<<
+
+        Response: {"running": bool, "models": ["qwen2.5-coder:14b", ...]}
+        """
+        from .ollama_client import is_running, list_models
+        running = is_running()
+        models = list_models() if running else []
+        return jsonify({"running": running, "models": models})
+
+    @app.route("/api/projects/<pid>/analyze", methods=["POST"])
+    def api_analyze(pid):
+        """Trigger on-demand Ollama analysis for a single transcript.
+
+        >>> LOCAL LLM CALL — sends transcript to qwen2.5-coder:14b synchronously <<<
+
+        Body: {"path": "/abs/path/to/source_file.mp3"}
+        Finds the .txt, runs analyze_transcript(), returns {"ok": true}.
+        """
+        p = registry.get(pid)
+        if not p:
+            abort(404)
+        body = request.get_json(force=True) or {}
+        path = body.get("path", "")
+        if not path:
+            return jsonify({"error": "path required"}), 400
+        src = Path(path)
+        tx = Engine.transcript_path_for(src, p.config, "txt")
+        if not tx.exists():
+            return jsonify({"error": "transcript not found", "looked_for": str(tx)}), 404
+        model = p.ollama.model or "qwen2.5-coder:14b"
+        analyses = p.ollama.analyses or ["summary", "topics"]
+        from .analyzer import analyze_transcript
+        events = list(analyze_transcript(tx, model, analyses))
+        failed = next((e for e in events if e.phase == "fail"), None)
+        if failed:
+            return jsonify({"error": failed.payload.get("reason", "analysis failed")}), 500
+        return jsonify({"ok": True})
+
+    # ----- creative narrative (Claude Opus 4.7) -----
+    # Coexists with Ollama analysis above: analyzer.py does fast/local factual
+    # analysis (summary + topics) auto-on-completion; narrate is on-demand
+    # literary rewrite, gated on ANTHROPIC_API_KEY. Separate sidecars
+    # (<stem>.narrative.scaffold.json + <stem>.narrative.<style>.md) so the
+    # two systems never collide on disk.
+
+    @app.route("/api/projects/<pid>/narrative", methods=["GET"])
+    def api_narrative_get(pid):
+        """Return cached scaffold+narrative for a transcript, or 404 if absent.
+
+        Query: ?path=<source>&style=story (style defaults to "story")
+        """
+        p = registry.get(pid)
+        if not p:
+            abort(404)
+        path = request.args.get("path", "")
+        style = request.args.get("style", "story")
+        if not path:
+            abort(400, "missing ?path=")
+        tx = Engine.transcript_path_for(Path(path), p.config, "txt")
+        if not tx.exists():
+            abort(404, "transcript not generated yet")
+        cached = narrate_mod.read_cached(tx, style=style)
+        if not cached:
+            abort(404, "no narrative cached yet — POST to /narrate to generate")
+        return jsonify(cached)
+
+    @app.route("/api/projects/<pid>/narrate", methods=["POST"])
+    def api_narrate(pid):
+        """Generate scaffold + narrative for a transcript using Claude Opus 4.7.
+
+        Body: {"path": <source>, "style": "story", "force": false, "language_hint": "en"}
+        Returns: {scaffold, narrative, scaffold_path, narrative_path, cached}
+        """
+        p = registry.get(pid)
+        if not p:
+            abort(404)
+        body = request.get_json(force=True) or {}
+        path = (body.get("path") or "").strip()
+        style = body.get("style") or "story"
+        force = bool(body.get("force", False))
+        language_hint = body.get("language_hint") or (
+            p.config.language if p.config.language != "auto" else "en"
+        )
+
+        if not path:
+            return jsonify({"ok": False, "error": "missing_path"}), 400
+        tx = Engine.transcript_path_for(Path(path), p.config, "txt")
+        if not tx.exists():
+            return jsonify({
+                "ok": False, "error": "no_transcript",
+                "message": "transcript not generated yet — transcribe the file first",
+            }), 404
+
+        try:
+            result = narrate_mod.narrate(
+                tx, style=style, language_hint=language_hint, force=force,
+            )
+        except narrate_mod.NarrateError as e:
+            return jsonify({
+                "ok": False, "error": "narrate_failed", "message": str(e),
+            }), 500
+
+        return jsonify({"ok": True, **result})
 
     @app.route("/api/projects/<pid>/prioritize", methods=["POST"])
     def api_prioritize(pid):
@@ -244,6 +380,159 @@ def create_app() -> tuple[Flask, Registry, Worker]:
             state.mark_skipped(path)
         return jsonify({"ok": True})
 
+    # ----- YouTube ingest -----
+    # Decision #11: keep these JSON-clean and parameter-stable so the
+    # MCP server track can lift them as `transcribe-studio:add_youtube_url`
+    # etc. without reshaping the contract.
+
+    _ALLOWED_MODES = ("speech", "music")
+    _TERMINAL_URL_STATUSES = ("done", "failed")
+    _IN_FLIGHT_URL_STATUSES = ("downloading", "separating", "transcribing")
+
+    @app.route("/api/projects/<pid>/youtube", methods=["GET"])
+    def api_youtube_list(pid):
+        p = registry.get(pid)
+        if not p:
+            abort(404)
+        state = registry.state(pid)
+        return jsonify({"urls": state.list_urls()})
+
+    @app.route("/api/projects/<pid>/youtube", methods=["POST"])
+    def api_youtube_submit(pid):
+        p = registry.get(pid)
+        if not p:
+            abort(404)
+        if not p.youtube_enabled:
+            return jsonify({
+                "ok": False,
+                "error": "youtube_disabled",
+                "message": "Enable YouTube ingest in this project's settings first.",
+            }), 400
+        if not p.folders:
+            return jsonify({
+                "ok": False,
+                "error": "no_folders",
+                "message": "Project has no folders configured; YouTube downloads need somewhere to land.",
+            }), 400
+
+        body = request.get_json(force=True) or {}
+        url = (body.get("url") or "").strip()
+        mode = (body.get("mode") or p.youtube_default_mode).strip().lower()
+
+        if not url:
+            return jsonify({"ok": False, "error": "missing_url"}), 400
+        if not (url.startswith("http://") or url.startswith("https://")):
+            return jsonify({
+                "ok": False, "error": "invalid_url",
+                "message": "URL must start with http:// or https://",
+            }), 400
+        if mode not in _ALLOWED_MODES:
+            return jsonify({
+                "ok": False, "error": "invalid_mode",
+                "message": f"mode must be one of {_ALLOWED_MODES}",
+            }), 400
+
+        state = registry.state(pid)
+        row = state.add_url(url, mode)
+        worker.wake()
+        return jsonify({"ok": True, "url_row": row}), 201
+
+    @app.route("/api/projects/<pid>/youtube/<url_id>", methods=["DELETE"])
+    def api_youtube_remove(pid, url_id):
+        p = registry.get(pid)
+        if not p:
+            abort(404)
+        state = registry.state(pid)
+        row = state.get_url(url_id)
+        if not row:
+            abort(404)
+        if row.get("status") in _IN_FLIGHT_URL_STATUSES:
+            return jsonify({
+                "ok": False,
+                "error": "in_flight",
+                "message": (
+                    f"URL is currently {row['status']}; pause the worker first or wait "
+                    f"for the stage to complete before removing."
+                ),
+            }), 409
+        state.remove_url(url_id)
+        return jsonify({"ok": True})
+
+    @app.route("/api/projects/<pid>/youtube/<url_id>/prioritize", methods=["POST"])
+    def api_youtube_prioritize(pid, url_id):
+        """Mark a queued URL as 'up next' — it'll run before other queued rows.
+
+        Body (optional): {"priority": true|false}. Defaults to true.
+        Only works on `queued` rows; in-flight rows can't be reordered (the
+        worker has already committed to the current one).
+        """
+        p = registry.get(pid)
+        if not p:
+            abort(404)
+        state = registry.state(pid)
+        row = state.get_url(url_id)
+        if not row:
+            abort(404)
+        if row.get("status") != "queued":
+            return jsonify({
+                "ok": False,
+                "error": "not_queued",
+                "message": f"can only reorder queued rows; this one is '{row.get('status')}'",
+            }), 409
+        body = request.get_json(silent=True) or {}
+        priority = bool(body.get("priority", True))
+        updated = state.update_url(url_id, priority=priority)
+        worker.wake()
+        return jsonify({"ok": True, "url_row": updated})
+
+    @app.route("/api/projects/<pid>/youtube/<url_id>/retry", methods=["POST"])
+    def api_youtube_retry(pid, url_id):
+        p = registry.get(pid)
+        if not p:
+            abort(404)
+        state = registry.state(pid)
+        row = state.get_url(url_id)
+        if not row:
+            abort(404)
+        if row.get("status") != "failed":
+            return jsonify({
+                "ok": False,
+                "error": "not_failed",
+                "message": f"can only retry failed rows; this one is '{row.get('status')}'",
+            }), 409
+        updated = state.update_url(
+            url_id,
+            status="queued", stage=None,
+            failed_reason=None,
+            started_at=None, finished_at=None,
+        )
+        worker.wake()
+        return jsonify({"ok": True, "url_row": updated})
+
+    # ----- audio serving (for Music tab HTML5 players) -----
+    @app.route("/api/audio")
+    def api_audio():
+        """Serve an audio file by absolute path for the in-browser Music tab players.
+
+        Security: only serves files with audio extensions that live under a
+        registered project folder. Rejects everything else with 403/404.
+        """
+        import pathlib as _pathlib
+        path = request.args.get("path", "")
+        p = _pathlib.Path(path).resolve()
+        if not p.exists() or not p.is_file():
+            abort(404)
+        allowed_suffixes = {".mp3", ".wav", ".m4a", ".ogg", ".flac"}
+        if p.suffix.lower() not in allowed_suffixes:
+            abort(403)
+        all_folders = []
+        for proj in registry.all():
+            all_folders.extend(proj.folders)
+        if not any(str(p).startswith(str(_pathlib.Path(f).resolve())) for f in all_folders):
+            abort(403)
+        mimetype = "audio/mpeg" if p.suffix.lower() == ".mp3" else "audio/wav"
+        return send_file(str(p), mimetype=mimetype)
+
     # ----- engine info (models, etc.) -----
     @app.route("/api/engine")
     def api_engine():
@@ -279,11 +568,22 @@ def create_app() -> tuple[Flask, Registry, Worker]:
 
 def _summary(p: Project, registry: Registry) -> dict:
     state = registry.state(p.id)
-    rows = annotate_with_state(scan_project(p), state)
+    rows = annotate_with_state(scan_project(p, state), state)
     counts = {"completed": 0, "failed": 0, "pending": 0, "skipped": 0, "in_progress": 0, "queued": 0}
     for r in rows:
         counts[r["status"]] = counts.get(r["status"], 0) + 1
     total = len(rows)
+
+    # YouTube inbox summary — count by status so the UI can render a
+    # badge without fetching the full list. Order chosen to match the
+    # row lifecycle for easy "where in pipeline" debugging.
+    yt_counts = {"queued": 0, "downloading": 0, "separating": 0,
+                 "transcribing": 0, "done": 0, "failed": 0}
+    for row in state.list_urls():
+        s = row.get("status")
+        if s in yt_counts:
+            yt_counts[s] += 1
+
     return {
         "id": p.id,
         "name": p.name,
@@ -299,6 +599,11 @@ def _summary(p: Project, registry: Registry) -> dict:
         "progress": (counts["completed"] / total) if total else 0,
         "folders": p.folders,
         "required_volumes": p.required_volumes,
+        # YouTube ingest
+        "youtube_enabled": p.youtube_enabled,
+        "youtube_default_mode": p.youtube_default_mode,
+        "youtube_counts": yt_counts,
+        "youtube_total": sum(yt_counts.values()),
     }
 
 

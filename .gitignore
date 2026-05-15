@@ -23,3 +23,4 @@ logs/
 # Local model cache, ad-hoc scratch
 *.bin
 .scratch/
+smoke_out/

@@ -83,12 +83,37 @@
           <label class="check"><input type="checkbox" id="np-nocontext" /> --no-context (anti-loop)</label>
           <label class="check"><input type="checkbox" id="np-acpower" checked /> Require AC power</label>
         </div>
+        <div class="row">
+          <label class="check"><input type="checkbox" id="np-youtube" /> Enable YouTube ingest</label>
+          <label>Default mode
+            <select id="np-youtube-mode">
+              <option value="speech">Speech (podcasts, interviews)</option>
+              <option value="music">Music (vocal/instrumental split)</option>
+            </select>
+          </label>
+        </div>
         <label>Required volumes <span class="muted small">(absolute paths, one per line)</span>
           <textarea id="np-volumes" rows="2" placeholder="/Volumes/MyDrive"></textarea>
         </label>
         <label>Exclude patterns <span class="muted small">(globs, one per line)</span>
           <textarea id="np-excludes" rows="2" placeholder="test_*
 *_draft.mov"></textarea>
+        </label>
+      </details>
+
+      <details>
+        <summary>AI Analysis (Ollama)</summary>
+        <label class="check" style="margin-top:8px;">
+          <input type="checkbox" id="np-ollama-enabled" />
+          Enable transcript analysis after each transcription
+        </label>
+        <label style="margin-top:8px;">Model
+          <select id="np-ollama-model">
+            <option value="qwen2.5-coder:14b">qwen2.5-coder:14b (installed)</option>
+            <option value="qwen2.5-coder:7b">qwen2.5-coder:7b (installed)</option>
+            <option value="qwen2.5-coder:3b">qwen2.5-coder:3b (installed)</option>
+          </select>
+          <span class="muted small" id="np-ollama-status">Requires Ollama at localhost:11434</span>
         </label>
       </details>
 
@@ -107,7 +132,41 @@
         <button class="modal-close" id="tx-close">×</button>
       </div>
       <div id="tx-quality"></div>
-      <pre id="tx-content" class="transcript-pre"></pre>
+      <!-- Tab bar: Transcript | Analysis | Narrative -->
+      <div class="modal-tabs" id="tx-tabs">
+        <button class="modal-tab active" data-tab="transcript">Transcript</button>
+        <button class="modal-tab" data-tab="analysis">Analysis</button>
+        <button class="modal-tab" data-tab="narrative">Narrative</button>
+      </div>
+      <!-- Transcript panel -->
+      <div id="tx-transcript-panel">
+        <pre id="tx-content" class="transcript-pre"></pre>
+      </div>
+      <!-- Analysis panel — Ollama summary+topics, populated by JS after fetch -->
+      <div id="tx-analysis-panel" style="display:none"></div>
+      <!-- Narrative panel — Claude Opus 4.7 creative rewrite -->
+      <div id="tx-narrative-panel" style="display:none">
+        <div class="narrative-controls">
+          <label>Style
+            <select id="tx-narrative-style">
+              <option value="story">Story (literary short-form)</option>
+              <option value="reflective_essay">Reflective essay (first person)</option>
+              <option value="scene_breakdown">Scene breakdown (script-form)</option>
+              <option value="summary_narrative">Summary narrative (~500 words)</option>
+            </select>
+          </label>
+          <button class="btn-primary" id="tx-narrate-btn">Generate narrative</button>
+          <button class="btn-secondary" id="tx-narrate-regen" hidden>Regenerate</button>
+          <span class="muted small" id="tx-narrate-status"></span>
+        </div>
+        <div id="tx-scaffold-body" class="scaffold-body" hidden></div>
+        <div id="tx-narrative-body" class="narrative-body">
+          <div class="muted small">
+            No narrative yet for this style. Click <strong>Generate</strong> to send the transcript to Claude Opus 4.7.
+            Requires <code>ANTHROPIC_API_KEY</code> exported in the environment.
+          </div>
+        </div>
+      </div>
       <div class="modal-actions">
         <button class="btn-secondary" id="tx-retranscribe">Re-transcribe</button>
         <button class="btn-secondary" id="tx-finder">Show in Finder</button>

@@ -24,6 +24,7 @@ const state = {
   status: null,
   view: "dashboard",
   selectedProjectId: null,
+  sourceTab: "local",          // "local" | "youtube" | "music" — active source-type tab
   filters: { search: "", status: "all" },
   rendered: { view: null, projectId: null },  // what's currently in the DOM
   fileListLastFetchedFor: null,
@@ -293,6 +294,8 @@ function renderProjectStructure() {
 
     <div id="now-playing-card"></div>
 
+    <div id="youtube-card"></div>
+
     <div class="card" id="files-card">
       <div class="flex-between" style="margin-bottom:12px;">
         <h3 class="card-title" style="margin:0;">Files</h3>
@@ -309,6 +312,7 @@ function renderProjectStructure() {
           </select>
         </div>
       </div>
+      <div id="source-tabs-bar"></div>
       <div id="file-list"><div class="muted">Loading…</div></div>
     </div>
   `;
@@ -350,10 +354,12 @@ function updateProjectLive(prevStatus) {
     ${p.no_context ? '<span class="tag">no-context</span>' : ""}
     <span class="tag">${p.ordering.replace("_", " ")}</span>
     ${p.auto_run ? '<span class="tag success">auto-run</span>' : '<span class="tag">manual</span>'}
+    ${p.youtube_enabled ? '<span class="tag accent">YouTube</span>' : ""}
   `;
 
   renderHeaderActions(s.worker.paused);
   renderNowPlayingInto("now-playing-card");
+  renderYoutubePanelInto("youtube-card", p, prevStatus);
 
   // Refresh file list if:
   //   - >15s since last fetch
@@ -411,6 +417,22 @@ function renderNowPlayingInto(targetId) {
     chunkInfo = `Chunk ${payload.chunk} / ${payload.of}`;
     phaseText = "transcribing";
   }
+  // YouTube ingest phases — map to friendlier labels with percent if present
+  const YT_PHASE_LABELS = {
+    preflight_yt:       "preparing YouTube ingest",
+    download_start:     "downloading",
+    download_progress:  "downloading",
+    download_done:      "download complete",
+    separate_start:     "separating vocals (Demucs)",
+    separate_progress:  "separating vocals (Demucs)",
+    separate_done:      "separation complete",
+  };
+  if (YT_PHASE_LABELS[ev.phase]) {
+    phaseText = YT_PHASE_LABELS[ev.phase];
+    if (typeof payload.percent === "number") {
+      chunkInfo = `${Math.round(payload.percent)}%`;
+    }
+  }
 
   // Build skeleton if not present, otherwise patch in place
   if (!target.querySelector(".now-playing")) {
@@ -467,20 +489,68 @@ async function fetchAndRenderFileList(pid) {
   } catch (e) { /* keep old list */ }
 }
 
+function renderSourceTabsInto(containerId) {
+  const el = $("#" + containerId);
+  if (!el) return;
+  const all = fileListCache;
+  const localCount  = all.filter(f => f.source === "folder").length;
+  const ytCount     = all.filter(f => f.source === "youtube" && f.youtube_mode !== "music").length;
+  const musicCount  = all.filter(f => f.source === "youtube" && f.youtube_mode === "music").length;
+  const tabs = [
+    { key: "local",   label: "Local Files", count: localCount  },
+    { key: "youtube", label: "YouTube",      count: ytCount     },
+    { key: "music",   label: "Music",        count: musicCount  },
+  ];
+  el.innerHTML = `<div class="source-tabs">${tabs.map(t => `
+    <button class="source-tab-btn${state.sourceTab === t.key ? " active" : ""}" data-tab="${t.key}">
+      ${t.label} <span class="tab-count">${t.count}</span>
+    </button>`).join("")}</div>`;
+  el.querySelectorAll(".source-tab-btn").forEach(btn => {
+    btn.onclick = () => {
+      state.sourceTab = btn.dataset.tab;
+      renderFileListFromCache();
+    };
+  });
+}
+
 function renderFileListFromCache() {
   const list = $("#file-list");
   if (!list) return;
+
+  // Render/update the source-type tab bar
+  renderSourceTabsInto("source-tabs-bar");
+
+  // Filter by active source tab first
   let rows = fileListCache;
+  if (state.sourceTab === "local") {
+    rows = rows.filter(r => r.source === "folder");
+  } else if (state.sourceTab === "youtube") {
+    rows = rows.filter(r => r.source === "youtube" && r.youtube_mode !== "music");
+  } else if (state.sourceTab === "music") {
+    rows = rows.filter(r => r.source === "youtube" && r.youtube_mode === "music");
+  }
+
+  // Then apply search/status filters
   if (state.filters.status !== "all") {
     rows = rows.filter(r => r.status === state.filters.status);
   }
   if (state.filters.search) {
     rows = rows.filter(r => r.name.toLowerCase().includes(state.filters.search));
   }
+
   if (rows.length === 0) {
     list.innerHTML = `<div class="empty-state">No files match.</div>`;
     return;
   }
+
+  // Music tab → music cards with audio players
+  if (state.sourceTab === "music") {
+    list.innerHTML = rows.map(f => renderMusicCard(f)).join("");
+    bindMusicCardHandlers();
+    return;
+  }
+
+  // Local / YouTube tabs → file table (existing layout)
   list.innerHTML = `<table class="file-table">
     <thead><tr>
       <th>File</th><th>Folder</th><th>Size</th><th>Modified</th><th>Status</th><th></th>
@@ -488,6 +558,70 @@ function renderFileListFromCache() {
     <tbody>${rows.map(fileRow).join("")}</tbody>
   </table>`;
   bindFileRowHandlers();
+}
+
+function renderMusicCard(file) {
+  const job = youtubeListCache.find(u => u.folder === file.folder);
+  const title = job?.title || file.name;
+  const instrPath = file.folder ? file.folder + "/instrumental.mp3" : null;
+  const pid = state.selectedProjectId;
+  const statusBadgeHtml = {
+    completed:   `<span class="badge badge-done">done</span>`,
+    pending:     `<span class="badge badge-pending">pending</span>`,
+    in_progress: `<span class="badge badge-progress">transcribing…</span>`,
+    queued:      `<span class="badge badge-queued">queued</span>`,
+    failed:      `<span class="badge badge-failed">failed</span>`,
+    skipped:     `<span class="badge badge-skipped">skipped</span>`,
+  }[file.status] || `<span class="badge badge-pending">${escapeHtml(file.status)}</span>`;
+
+  const audioPlayers = file.status === "completed" ? `
+    <div class="audio-row">
+      <span class="audio-label">Vocals</span>
+      <audio controls src="/api/audio?path=${encodeURIComponent(file.path)}"></audio>
+    </div>
+    <div class="audio-row">
+      <span class="audio-label">Instrumental</span>
+      <audio controls src="/api/audio?path=${encodeURIComponent(instrPath)}"></audio>
+    </div>` : `<div style="margin-top:8px">${statusBadgeHtml}</div>`;
+
+  return `<div class="music-card" data-path="${escapeAttr(file.path)}">
+    <div class="music-card-header">
+      <div>
+        <div class="music-card-title">${escapeHtml(title)}</div>
+        <div class="music-card-meta">${escapeHtml(file.name)} · ${fmt.bytes(file.size_bytes)}</div>
+      </div>
+      <span class="badge badge-music">♪ Music</span>
+    </div>
+    ${audioPlayers}
+    <div class="music-card-actions">
+      ${file.has_transcript
+        ? `<button class="btn-secondary mc-view" data-path="${escapeAttr(file.path)}" data-pid="${escapeAttr(pid)}" style="font-size:12px;padding:4px 10px;">View lyrics</button>`
+        : ""}
+      ${file.status === "pending"
+        ? `<button class="btn-icon mc-priority" data-path="${escapeAttr(file.path)}" title="Move to front of queue">↑</button>`
+        : ""}
+      ${file.has_transcript
+        ? `<button class="btn-icon mc-redo" data-path="${escapeAttr(file.path)}" title="Re-transcribe">redo</button>`
+        : ""}
+    </div>
+  </div>`;
+}
+
+function bindMusicCardHandlers() {
+  const pid = state.selectedProjectId;
+  $$("#file-list .music-card[data-path]").forEach(card => {
+    const path = card.dataset.path;
+    $(".mc-view", card)?.addEventListener("click", e => { e.stopPropagation(); openTranscript(pid, path); });
+    $(".mc-priority", card)?.addEventListener("click", e => {
+      e.stopPropagation();
+      api(`/api/projects/${pid}/prioritize`, { method: "POST", body: { paths: [path] } });
+    });
+    $(".mc-redo", card)?.addEventListener("click", e => {
+      e.stopPropagation();
+      if (!confirm("Re-transcribe? The existing transcript will be deleted.")) return;
+      api(`/api/projects/${pid}/retranscribe`, { method: "POST", body: { paths: [path] } });
+    });
+  });
 }
 
 function fileRow(r) {
@@ -543,6 +677,241 @@ function bindFileRowHandlers() {
   });
 }
 
+// ---------- youtube panel ----------
+
+let youtubeListCache = [];
+let youtubeListLastFetchedFor = null;
+let youtubeListLastFetchedAt = 0;
+
+const YT_STATUS_TAG = {
+  queued:       '<span class="tag">queued</span>',
+  downloading:  '<span class="tag accent">downloading</span>',
+  separating:   '<span class="tag accent">separating</span>',
+  transcribing: '<span class="tag accent">transcribing</span>',
+  done:         '<span class="tag success">done</span>',
+  failed:       '<span class="tag danger">failed</span>',
+};
+
+function renderYoutubePanelInto(targetId, p, prevStatus) {
+  const target = $("#" + targetId);
+  if (!target) return;
+
+  // Card skeleton, rendered once and patched after
+  if (!target.querySelector(".yt-card")) {
+    target.innerHTML = `
+      <div class="card yt-card">
+        <div class="flex-between" style="margin-bottom:8px;">
+          <h3 class="card-title" style="margin:0;">YouTube ingest</h3>
+          <div id="yt-toggle"></div>
+        </div>
+        <div id="yt-body"></div>
+      </div>
+    `;
+  }
+
+  // Header toggle (enabled / disabled) — always visible
+  const tog = $("#yt-toggle");
+  tog.innerHTML = p.youtube_enabled
+    ? `<button class="btn-secondary" id="yt-disable-btn">Disable</button>`
+    : `<button class="btn-primary" id="yt-enable-btn">Enable for this project</button>`;
+  if ($("#yt-enable-btn")) $("#yt-enable-btn").onclick = () => toggleYoutube(p.id, true);
+  if ($("#yt-disable-btn")) $("#yt-disable-btn").onclick = () => toggleYoutube(p.id, false);
+
+  const body = $("#yt-body");
+  if (!p.youtube_enabled) {
+    if (!body.querySelector(".yt-disabled-msg")) {
+      body.innerHTML = `<div class="muted small yt-disabled-msg">
+        Disabled. Enabling lets you paste a YouTube URL to download (and optionally
+        separate vocals via Demucs) into <code>${escapeHtml(p.folders[0] || "(no folder)")}/youtube/</code>.
+        Requires <code>yt-dlp</code> and (for music mode) <code>demucs</code> installed.
+      </div>`;
+    }
+    return;
+  }
+
+  // Enabled: render input + list. Skeleton once, patch list on update.
+  if (!body.querySelector(".yt-input-row")) {
+    body.innerHTML = `
+      <div class="yt-input-row" style="display:flex; gap:8px; align-items:center; margin-bottom:12px;">
+        <input type="url" id="yt-url-input" placeholder="https://www.youtube.com/watch?v=..."
+               style="flex:1; padding:8px; border:1px solid var(--border); border-radius:6px;"/>
+        <select id="yt-mode-select" style="padding:8px; border:1px solid var(--border); border-radius:6px;">
+          <option value="speech">Speech</option>
+          <option value="music">Music</option>
+        </select>
+        <button class="btn-primary" id="yt-submit-btn">Add URL</button>
+      </div>
+      <div id="yt-list"></div>
+    `;
+    $("#yt-mode-select").value = p.youtube_default_mode || "speech";
+    $("#yt-submit-btn").onclick = () => submitYoutubeUrl(p.id);
+    $("#yt-url-input").addEventListener("keydown", (e) => {
+      if (e.key === "Enter") submitYoutubeUrl(p.id);
+    });
+  }
+
+  // Fetch on view-enter, or when youtube_total changes vs. prev poll,
+  // or when stale (>10s). Keeps the panel responsive without thrashing.
+  const now = Date.now() / 1000;
+  const stale = (now - youtubeListLastFetchedAt) > 10;
+  const prevP = prevStatus?.projects?.find(x => x.id === p.id);
+  const totalChanged = prevP && prevP.youtube_total !== p.youtube_total;
+  const projectSwitched = youtubeListLastFetchedFor !== p.id;
+  if (projectSwitched || stale || totalChanged) {
+    fetchAndRenderYoutubeList(p.id);
+  } else {
+    renderYoutubeListFromCache();
+  }
+}
+
+async function fetchAndRenderYoutubeList(pid) {
+  try {
+    const data = await api(`/api/projects/${pid}/youtube`);
+    youtubeListCache = data.urls || [];
+    youtubeListLastFetchedFor = pid;
+    youtubeListLastFetchedAt = Date.now() / 1000;
+    renderYoutubeListFromCache();
+  } catch (e) { /* keep old list */ }
+}
+
+function renderYoutubeListFromCache() {
+  const list = $("#yt-list");
+  if (!list) return;
+  if (youtubeListCache.length === 0) {
+    list.innerHTML = `<div class="muted small">No URLs yet — paste one above to ingest.</div>`;
+    return;
+  }
+  // Sort: in-flight first, then queued (priority within queued), then terminal
+  const order = { downloading: 0, separating: 1, transcribing: 2, queued: 3, failed: 4, done: 5 };
+  const sorted = [...youtubeListCache].sort((a, b) => {
+    const so = (order[a.status] ?? 9) - (order[b.status] ?? 9);
+    if (so !== 0) return so;
+    // Within same status, priority rows first (for queued); then submission order.
+    if ((a.priority ?? false) !== (b.priority ?? false)) return a.priority ? -1 : 1;
+    return (a.submitted_at || "").localeCompare(b.submitted_at || "");
+  });
+  list.innerHTML = `<table class="file-table yt-table">
+    <thead><tr><th>Title / URL</th><th>Mode</th><th>Status</th><th>Submitted</th><th></th></tr></thead>
+    <tbody>${sorted.map(youtubeRow).join("")}</tbody>
+  </table>`;
+  bindYoutubeRowHandlers();
+}
+
+function youtubeRow(r) {
+  const title = r.title || r.url;
+  const submitted = r.submitted_at
+    ? new Date(r.submitted_at).toLocaleString()
+    : "—";
+  const stageInfo = (r.status && r.stage && r.status !== r.stage)
+    ? `<span class="muted small"> · ${escapeHtml(r.stage)}</span>` : "";
+  const priorityBadge = r.priority
+    ? ' <span class="tag accent" title="Up next">↑ up next</span>'
+    : "";
+  const failReason = r.failed_reason
+    ? `<div class="muted small" style="margin-top:2px;">${escapeHtml(r.failed_reason)}</div>`
+    : "";
+  const statusTag = (YT_STATUS_TAG[r.status] || `<span class="tag">${r.status}</span>`) + stageInfo + priorityBadge;
+  return `<tr data-url-id="${escapeAttr(r.id)}" class="yt-${r.status}">
+    <td><div class="filename" title="${escapeAttr(r.url)}">${escapeHtml(title)}</div>${failReason}</td>
+    <td><span class="tag">${escapeHtml(r.mode)}</span></td>
+    <td>${statusTag}</td>
+    <td class="muted small">${escapeHtml(submitted)}</td>
+    <td><div class="actions">
+      ${r.status === "queued" && !r.priority ?
+        '<button class="btn-icon yt-action-priority" title="Run this URL before others in the queue">↑ up next</button>' : ""}
+      ${r.status === "queued" && r.priority ?
+        '<button class="btn-icon yt-action-unpriority" title="Drop priority — back to submission order">unprioritize</button>' : ""}
+      ${r.status === "failed" ? '<button class="btn-icon yt-action-retry" title="Retry">retry</button>' : ""}
+      ${(r.status === "queued" || r.status === "failed" || r.status === "done") ?
+        '<button class="btn-icon yt-action-remove" title="Remove">×</button>' : ""}
+    </div></td>
+  </tr>`;
+}
+
+function bindYoutubeRowHandlers() {
+  const pid = state.selectedProjectId;
+  $$("#yt-list tr[data-url-id]").forEach(tr => {
+    const id = tr.dataset.urlId;
+    $(".yt-action-retry", tr)?.addEventListener("click", async (e) => {
+      e.stopPropagation();
+      try {
+        await api(`/api/projects/${pid}/youtube/${id}/retry`, { method: "POST" });
+        fetchAndRenderYoutubeList(pid);
+      } catch (err) { alert("Retry failed: " + err.message); }
+    });
+    $(".yt-action-remove", tr)?.addEventListener("click", async (e) => {
+      e.stopPropagation();
+      if (!confirm("Remove this URL from the queue?")) return;
+      try {
+        await api(`/api/projects/${pid}/youtube/${id}`, { method: "DELETE" });
+        fetchAndRenderYoutubeList(pid);
+      } catch (err) { alert("Remove failed: " + err.message); }
+    });
+    $(".yt-action-priority", tr)?.addEventListener("click", async (e) => {
+      e.stopPropagation();
+      try {
+        await api(`/api/projects/${pid}/youtube/${id}/prioritize`, {
+          method: "POST", body: { priority: true },
+        });
+        fetchAndRenderYoutubeList(pid);
+        pollStatus();
+      } catch (err) { alert("Prioritize failed: " + err.message); }
+    });
+    $(".yt-action-unpriority", tr)?.addEventListener("click", async (e) => {
+      e.stopPropagation();
+      try {
+        await api(`/api/projects/${pid}/youtube/${id}/prioritize`, {
+          method: "POST", body: { priority: false },
+        });
+        fetchAndRenderYoutubeList(pid);
+      } catch (err) { alert("Unprioritize failed: " + err.message); }
+    });
+  });
+}
+
+async function submitYoutubeUrl(pid) {
+  const url = $("#yt-url-input").value.trim();
+  const mode = $("#yt-mode-select").value;
+  if (!url) return;
+  const btn = $("#yt-submit-btn");
+  btn.disabled = true;
+  try {
+    const res = await fetch(`/api/projects/${pid}/youtube`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ url, mode }),
+    });
+    const data = await res.json();
+    if (!res.ok || !data.ok) {
+      alert(data.message || data.error || `submit failed (${res.status})`);
+    } else {
+      $("#yt-url-input").value = "";
+      fetchAndRenderYoutubeList(pid);
+      pollStatus();
+    }
+  } catch (e) {
+    alert("Submit failed: " + e.message);
+  } finally {
+    btn.disabled = false;
+  }
+}
+
+async function toggleYoutube(pid, enable) {
+  if (!enable && !confirm(
+    "Disable YouTube ingest for this project?\n\n" +
+    "Already-queued URLs will keep processing. Disabling just hides the input."
+  )) return;
+  try {
+    await api(`/api/projects/${pid}`, {
+      method: "PATCH",
+      body: { youtube_enabled: enable },
+    });
+    pollStatus();
+  } catch (e) {
+    alert("Toggle failed: " + e.message);
+  }
+}
+
 // ---------- modals ----------
 
 function closeAllModals() {
@@ -554,14 +923,47 @@ function openModal(id) {
   $("#" + id).hidden = false;
 }
 
+// Per-open state for the transcript modal (used by the Narrative tab).
+const txModalState = { pid: null, path: null, transcriptLoaded: false };
+
 async function openTranscript(pid, path) {
   openModal("transcript-modal");
   $("#tx-filename").textContent = path.split("/").pop();
   $("#tx-quality").innerHTML = "";
   $("#tx-content").textContent = "Loading…";
+  $("#tx-analysis-panel").innerHTML = "";
+
+  txModalState.pid = pid;
+  txModalState.path = path;
+  txModalState.transcriptLoaded = false;
+  resetNarrativePane();
+
+  // Three-panel tab switching (Transcript | Analysis | Narrative).
+  // Panel ids follow the pattern tx-<tab>-panel; data-tab matches.
+  const tabs = $$("#tx-tabs .modal-tab");
+  const panels = {
+    transcript: $("#tx-transcript-panel"),
+    analysis:   $("#tx-analysis-panel"),
+    narrative:  $("#tx-narrative-panel"),
+  };
+  tabs.forEach(btn => {
+    btn.onclick = () => {
+      tabs.forEach(b => b.classList.remove("active"));
+      btn.classList.add("active");
+      Object.entries(panels).forEach(([key, el]) => {
+        if (el) el.style.display = (key === btn.dataset.tab) ? "" : "none";
+      });
+      // Narrative tab: try to pre-load any cached narrative for the current style.
+      if (btn.dataset.tab === "narrative") tryLoadCachedNarrative();
+    };
+  });
+  // Reset to transcript tab
+  tabs[0]?.click();
 
   try {
     const data = await api(`/api/projects/${pid}/transcript?path=${encodeURIComponent(path)}`);
+
+    // Quality banner
     const qual = data.quality;
     let qualHtml = "";
     if (qual && qual.warnings && qual.warnings.length) {
@@ -572,9 +974,19 @@ async function openTranscript(pid, path) {
       </div>`;
     }
     $("#tx-quality").innerHTML = qualHtml;
+
+    // Transcript text
     $("#tx-content").textContent = data.txt && data.txt.trim()
       ? data.txt
       : "(this file hasn't been transcribed yet — close this and use ↑ to prioritize it)";
+    txModalState.transcriptLoaded = !!(data.txt && data.txt.trim());
+
+    // Analysis panel content (Ollama)
+    panels.analysis.innerHTML = renderAnalysisPanel(data.analysis, pid, path);
+    bindAnalysisPanelHandlers(pid, path);
+
+    // Narrative tab handlers (Opus). Bound once per modal open.
+    bindNarrativeTabHandlers();
 
     $("#tx-retranscribe").onclick = async () => {
       if (!confirm("Re-transcribe this file? The existing transcript will be deleted.")) return;
@@ -590,8 +1002,211 @@ async function openTranscript(pid, path) {
   }
 }
 
+// ---------- Narrative tab (Claude Opus 4.7) ----------
+
+function resetNarrativePane() {
+  $("#tx-narrate-status").textContent = "";
+  $("#tx-narrate-regen").hidden = true;
+  $("#tx-scaffold-body").hidden = true;
+  $("#tx-scaffold-body").innerHTML = "";
+  $("#tx-narrative-body").innerHTML = `<div class="muted small">
+    No narrative yet for this style. Click <strong>Generate</strong> to send the transcript to Claude Opus 4.7.
+    Requires <code>ANTHROPIC_API_KEY</code> exported in the environment.
+  </div>`;
+}
+
+function bindNarrativeTabHandlers() {
+  $("#tx-narrative-style").onchange = () => {
+    resetNarrativePane();
+    tryLoadCachedNarrative();
+  };
+  $("#tx-narrate-btn").onclick = () => generateNarrative({ force: false });
+  $("#tx-narrate-regen").onclick = () => {
+    if (!confirm("Regenerate? This sends the transcript to Claude Opus 4.7 again and overwrites the cached output for this style.")) return;
+    generateNarrative({ force: true });
+  };
+}
+
+async function tryLoadCachedNarrative() {
+  const { pid, path } = txModalState;
+  if (!pid || !path) return;
+  const style = $("#tx-narrative-style").value;
+  try {
+    const data = await api(
+      `/api/projects/${pid}/narrative?path=${encodeURIComponent(path)}&style=${encodeURIComponent(style)}`
+    );
+    renderNarrativeResult(data);
+    $("#tx-narrate-status").textContent = "cached";
+  } catch (e) {
+    // 404 is expected if no narrative cached yet — leave the empty prompt in place.
+  }
+}
+
+async function generateNarrative({ force }) {
+  const { pid, path, transcriptLoaded } = txModalState;
+  if (!pid || !path) return;
+  if (!transcriptLoaded) {
+    alert("Transcribe this file first — there's no .txt yet.");
+    return;
+  }
+  const style = $("#tx-narrative-style").value;
+  const btn = $("#tx-narrate-btn");
+  const regen = $("#tx-narrate-regen");
+  const status = $("#tx-narrate-status");
+  btn.disabled = true; regen.disabled = true;
+  status.textContent = force ? "regenerating… (30–90s)" : "generating… (30–90s)";
+  try {
+    const res = await fetch(`/api/projects/${pid}/narrate`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ path, style, force }),
+    });
+    const data = await res.json();
+    if (!res.ok || !data.ok) {
+      status.textContent = "";
+      alert(data.message || data.error || `narrate failed (${res.status})`);
+      return;
+    }
+    renderNarrativeResult(data);
+    status.textContent = data.cached ? "cached" : "generated";
+  } catch (e) {
+    status.textContent = "";
+    alert("Generate failed: " + e.message);
+  } finally {
+    btn.disabled = false; regen.disabled = false;
+  }
+}
+
+function renderNarrativeResult(data) {
+  // Scaffold pane: render structured fields if present.
+  const s = data.scaffold || {};
+  const parts = [];
+  if (s.summary_one_line) {
+    parts.push(`<p class="scaffold-summary">${escapeHtml(s.summary_one_line)}</p>`);
+  }
+  if (Array.isArray(s.themes) && s.themes.length) {
+    parts.push(`<section><h4>Themes</h4><div class="tag-row">${
+      s.themes.map(t => `<span class="topic-pill">${escapeHtml(t)}</span>`).join("")
+    }</div></section>`);
+  }
+  if (Array.isArray(s.characters) && s.characters.length) {
+    parts.push(`<section><h4>Characters</h4><ul>${
+      s.characters.map(c => `<li><strong>${escapeHtml(c.name || "?")}</strong>${
+        c.role ? ` <span class="muted small">(${escapeHtml(c.role)})</span>` : ""
+      }${c.description ? ` — ${escapeHtml(c.description)}` : ""}</li>`).join("")
+    }</ul></section>`);
+  }
+  if (s.emotional_arc) {
+    parts.push(`<section><h4>Emotional arc</h4><p>${escapeHtml(s.emotional_arc)}</p></section>`);
+  }
+  if (Array.isArray(s.story_beats) && s.story_beats.length) {
+    parts.push(`<section><h4>Story beats</h4><ol>${
+      s.story_beats.map(b => `<li><strong>${escapeHtml(b.moment || "")}</strong>${
+        b.significance ? ` — ${escapeHtml(b.significance)}` : ""
+      }</li>`).join("")
+    }</ol></section>`);
+  }
+  if (Array.isArray(s.notable_quotes) && s.notable_quotes.length) {
+    parts.push(`<section><h4>Notable quotes</h4>${
+      s.notable_quotes.map(q => `<blockquote>"${escapeHtml(q.quote || "")}"${
+        (q.context || q.why_resonant)
+          ? `<div class="muted small">${[q.context, q.why_resonant].filter(Boolean).map(escapeHtml).join(" — ")}</div>`
+          : ""
+      }</blockquote>`).join("")
+    }</section>`);
+  }
+  const scaffoldEl = $("#tx-scaffold-body");
+  scaffoldEl.innerHTML = parts.length
+    ? `<details class="scaffold-details" open><summary>Scaffold (themes, beats, characters)</summary>${parts.join("")}</details>`
+    : "";
+  scaffoldEl.hidden = parts.length === 0;
+
+  // Narrative pane: render the Markdown loosely.
+  $("#tx-narrative-body").innerHTML = renderLooseMarkdown(data.narrative || "");
+  $("#tx-narrate-regen").hidden = false;
+}
+
+// Minimal Markdown-ish renderer: paragraphs, # / ## / ### headings, **bold**, *italic*.
+function renderLooseMarkdown(md) {
+  if (!md) return "";
+  const esc = escapeHtml(md);
+  const blocks = esc.split(/\n{2,}/);
+  return blocks.map(block => {
+    const trimmed = block.trim();
+    if (!trimmed) return "";
+    const h = trimmed.match(/^(#{1,3})\s+(.+)$/);
+    if (h) {
+      const level = h[1].length + 1; // # → h2, ## → h3, ### → h4
+      return `<h${level}>${applyInline(h[2])}</h${level}>`;
+    }
+    return `<p>${applyInline(trimmed.replace(/\n/g, "<br/>"))}</p>`;
+  }).join("");
+}
+
+function applyInline(s) {
+  return s
+    .replace(/\*\*(.+?)\*\*/g, "<strong>$1</strong>")
+    .replace(/\*(.+?)\*/g, "<em>$1</em>");
+}
+
+function renderAnalysisPanel(analysis, pid, path) {
+  if (!analysis) {
+    return `<div class="analysis-empty">
+      <div class="muted">No analysis yet.</div>
+      <button class="analyze-btn" id="btn-analyze">
+        ✦ Analyze with qwen2.5-coder
+      </button>
+    </div>`;
+  }
+  const topicsHtml = (analysis.topics || []).length
+    ? `<div class="topics-row">${analysis.topics.map(t => `<span class="topic-pill">${escapeHtml(t)}</span>`).join("")}</div>`
+    : "";
+  const summaryHtml = analysis.summary
+    ? `<div class="analysis-summary">${escapeHtml(analysis.summary)}</div>`
+    : "";
+  const errorHtml = analysis.error
+    ? `<div class="warning-banner" style="margin-top:8px;">${escapeHtml(analysis.error)}</div>`
+    : "";
+  return `<div class="analysis-panel">
+    ${summaryHtml}
+    ${topicsHtml}
+    ${errorHtml}
+    <div class="analysis-meta">
+      Analyzed with <strong>${escapeHtml(analysis.model)}</strong>
+      · ${(analysis.word_count || 0).toLocaleString()} words
+      · ${analysis.analyzed_at ? new Date(analysis.analyzed_at).toLocaleString() : ""}
+    </div>
+    <div style="margin-top:12px;">
+      <button class="analyze-btn" id="btn-analyze" style="font-size:12px;padding:5px 12px;">
+        Re-analyze
+      </button>
+    </div>
+  </div>`;
+}
+
+function bindAnalysisPanelHandlers(pid, path) {
+  const btn = $("#btn-analyze");
+  if (!btn) return;
+  btn.onclick = async () => {
+    btn.disabled = true;
+    btn.textContent = "Analyzing…";
+    try {
+      // >>> LOCAL LLM CALL — sends this transcript to qwen2.5-coder:14b <<<
+      await api(`/api/projects/${pid}/analyze`, { method: "POST", body: { path } });
+      // Reload the modal with fresh analysis
+      await openTranscript(pid, path);
+    } catch (e) {
+      btn.disabled = false;
+      btn.textContent = "✦ Analyze with qwen2.5-coder";
+      alert("Analysis failed: " + e.message);
+    }
+  };
+}
+
 async function openNewProjectModal() {
   openModal("new-project-modal");
+
+  // Whisper models
   const eng = await api("/api/engine");
   const select = $("#np-model");
   select.innerHTML = "";
@@ -608,6 +1223,25 @@ async function openNewProjectModal() {
       if (m.name === "ggml-large-v3.bin") opt.selected = true;
       select.appendChild(opt);
     });
+  }
+
+  // >>> LOCAL LLM QUERY — check if Ollama is running and list models <<<
+  // Populates the AI Analysis model dropdown with installed Ollama models.
+  try {
+    const ollamaData = await api("/api/ollama/models");
+    const ollamaSelect = $("#np-ollama-model");
+    const statusEl = $("#np-ollama-status");
+    if (ollamaData.running && ollamaData.models.length) {
+      ollamaSelect.innerHTML = ollamaData.models.map(m =>
+        `<option value="${escapeAttr(m)}"${m === "qwen2.5-coder:14b" ? " selected" : ""}>${escapeHtml(m)}</option>`
+      ).join("");
+      if (statusEl) statusEl.textContent = `${ollamaData.models.length} model${ollamaData.models.length===1?"":"s"} available`;
+    } else {
+      if (statusEl) statusEl.textContent = "Ollama not running — start it to enable analysis";
+    }
+  } catch (e) {
+    const statusEl = $("#np-ollama-status");
+    if (statusEl) statusEl.textContent = "Could not reach Ollama";
   }
 }
 
@@ -628,6 +1262,14 @@ function bindNewProjectHandlers() {
         translate_to_english: $("#np-translate").checked,
         vad: $("#np-vad").checked,
         no_context: $("#np-nocontext").checked,
+      },
+      youtube_enabled: $("#np-youtube").checked,
+      youtube_default_mode: $("#np-youtube-mode").value,
+      ollama: {
+        enabled: $("#np-ollama-enabled").checked,
+        model: $("#np-ollama-model").value || "qwen2.5-coder:14b",
+        analyses: ["summary", "topics"],
+        base_url: "http://localhost:11434",
       },
     };
     if (!body.name) return alert("Name required");

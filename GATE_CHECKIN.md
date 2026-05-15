@@ -7,7 +7,7 @@ at each stage, and a running decisions/risks log so future sessions
 
 Owner: Ruchir
 Opened: 2026-05-13
-Status: **Gate 0 — Spec review** (current)
+Status: **Gate 3 — Studio integration** (Gates 1–2 done 2026-05-13; Gate 0 sign-off still pending)
 
 ---
 
@@ -195,8 +195,8 @@ that you have to stop and look at the checklist before moving on.
 
 ```
 Gate 0  Spec review              [ ] Ruchir   ___________ (date)
-Gate 1  Git baseline             [ ] Ruchir   ___________
-Gate 2  Prototype on the bench   [ ] Ruchir   ___________
+Gate 1  Git baseline             [x] Ruchir   2026-05-13
+Gate 2  Prototype on the bench   [x] Ruchir   2026-05-13
 Gate 3  Studio integration       [ ] Ruchir   ___________
 Gate 4  Impact regression        [ ] Ruchir   ___________
 Gate 5  Ship                     [ ] Ruchir   ___________
