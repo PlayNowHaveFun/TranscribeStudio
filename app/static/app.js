@@ -994,8 +994,22 @@ async function openTranscript(pid, path) {
       closeAllModals();
       pollStatus();
     };
-    $("#tx-finder").onclick = () => {
-      window.open(`file://${path.split("/").slice(0,-1).join("/")}/`, "_blank");
+    $("#tx-finder").onclick = async (e) => {
+      // Browsers silently block window.open("file://..."), so we ask the
+      // local Flask backend to shell out to macOS `open -R`. The button
+      // briefly disables on click and surfaces an inline error label if
+      // the reveal fails (e.g., file deleted).
+      const btn = e.currentTarget;
+      const orig = btn.textContent;
+      btn.disabled = true;
+      try {
+        await api("/api/reveal", { method: "POST", body: { path } });
+      } catch (err) {
+        btn.textContent = "Couldn't open Finder";
+        setTimeout(() => { btn.textContent = orig; btn.disabled = false; }, 1800);
+        return;
+      }
+      btn.disabled = false;
     };
   } catch (e) {
     $("#tx-content").textContent = "Error loading transcript: " + e.message;

@@ -9,6 +9,7 @@ from __future__ import annotations
 import json
 import os
 import socket
+import subprocess
 import sys
 import threading
 import webbrowser
@@ -552,6 +553,45 @@ def create_app() -> tuple[Flask, Registry, Worker]:
             "installed_models": installed,
             "known_models": KNOWN_MODELS,
         })
+
+    # ----- reveal file in Finder -----
+    # Browsers block window.open("file://...") for security, so the UI's
+    # "Show in Finder" button posts here and we shell out to `open -R`.
+    # Do NOT stat the path from Python — paths under ~/Documents are TCC-
+    # protected and `pathlib.exists()` would trigger the Files-and-Folders
+    # permission prompt for Terminal/Python. `open` is a Launch Services
+    # shim that reveals via Finder, which has its own TCC scope, so the
+    # prompt never appears. Falls back to `open <parent>` if reveal fails
+    # (file was deleted but transcript record remains).
+    @app.route("/api/reveal", methods=["POST"])
+    def api_reveal():
+        body = request.get_json(silent=True) or {}
+        raw = (body.get("path") or "").strip()
+        if not raw:
+            return jsonify({"error": "path required"}), 400
+        try:
+            r = subprocess.run(
+                ["open", "-R", raw],
+                capture_output=True, text=True, timeout=5,
+            )
+        except Exception as e:
+            return jsonify({"error": f"open failed: {e}"}), 500
+        if r.returncode == 0:
+            return jsonify({"ok": True, "revealed": raw})
+        parent = str(Path(raw).parent)
+        try:
+            r2 = subprocess.run(
+                ["open", parent],
+                capture_output=True, text=True, timeout=5,
+            )
+        except Exception as e:
+            return jsonify({"error": f"open failed: {e}"}), 500
+        if r2.returncode == 0:
+            return jsonify({"ok": True, "opened_parent": parent})
+        return jsonify({
+            "error": (r.stderr or r2.stderr or "open returned non-zero").strip(),
+            "path": raw,
+        }), 404
 
     # ----- log tail -----
     @app.route("/api/log")
