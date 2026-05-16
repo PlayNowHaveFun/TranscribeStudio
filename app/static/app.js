@@ -1262,6 +1262,18 @@ async function openNewProjectModal() {
 function bindNewProjectHandlers() {
   $("#add-project-btn").onclick = openNewProjectModal;
   $("#np-cancel").onclick = closeAllModals;
+  $("#np-browse").onclick = async () => {
+    try {
+      const res = await api("/api/dialog/pick-folder", { method: "POST", body: {} });
+      if (res.cancelled || !res.path) return;
+      const ta = $("#np-folders");
+      const cur = ta.value.replace(/\s+$/, "");
+      ta.value = cur ? `${cur}\n${res.path}` : res.path;
+      ta.focus();
+    } catch (e) {
+      alert("Couldn't open Finder picker: " + e.message);
+    }
+  };
   $("#np-create").onclick = async () => {
     const body = {
       name: $("#np-name").value.trim(),

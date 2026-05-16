@@ -554,6 +554,29 @@ def create_app() -> tuple[Flask, Registry, Worker]:
             "known_models": KNOWN_MODELS,
         })
 
+    # ----- native macOS folder picker -----
+    # Browsers can't open the Finder folder chooser, so we shell out to
+    # osascript and return the chosen POSIX path. Cancel → {"cancelled": true}
+    # (osascript exits non-zero with "User canceled" on stderr).
+    @app.route("/api/dialog/pick-folder", methods=["POST"])
+    def api_pick_folder():
+        try:
+            r = subprocess.run(
+                ["osascript", "-e",
+                 'POSIX path of (choose folder with prompt "Choose a project folder")'],
+                capture_output=True, text=True, timeout=120,
+            )
+        except Exception as e:
+            return jsonify({"error": f"osascript failed: {e}"}), 500
+        if r.returncode != 0:
+            if "User canceled" in (r.stderr or "") or "User cancelled" in (r.stderr or ""):
+                return jsonify({"cancelled": True})
+            return jsonify({"error": (r.stderr or "osascript returned non-zero").strip()}), 500
+        path = (r.stdout or "").strip().rstrip("/")
+        if not path:
+            return jsonify({"cancelled": True})
+        return jsonify({"path": path})
+
     # ----- reveal file in Finder -----
     # Browsers block window.open("file://...") for security, so the UI's
     # "Show in Finder" button posts here and we shell out to `open -R`.
