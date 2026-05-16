@@ -36,6 +36,16 @@
       <!-- Dashboard / project view rendered here -->
       <div id="content"></div>
     </main>
+
+    <aside class="qpanel" id="qpanel">
+      <div class="qpanel-header">
+        <h3>Queue</h3>
+        <span class="qpanel-count" id="qpanel-count">0</span>
+      </div>
+      <div class="qpanel-list" id="qpanel-list">
+        <div class="qpanel-empty">No items queued. Use the queue button on a file row to add one.</div>
+      </div>
+    </aside>
   </div>
 
   <!-- New project modal -->
@@ -174,6 +184,7 @@
     </div>
   </div>
 
+  <script src="/static/vendor/Sortable.min.js"></script>
   <script src="/static/app.js"></script>
 </body>
 </html>

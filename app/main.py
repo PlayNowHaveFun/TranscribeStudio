@@ -159,10 +159,98 @@ def create_app() -> tuple[Flask, Registry, Worker]:
             music_force_no_context=body.get("music_force_no_context", True),
             music_demucs_segment=body.get("music_demucs_segment", 0),
             ollama=ollama_cfg,
+            group=body.get("group", ""),
         )
         registry.add(proj)
         worker.wake()
         return jsonify(_full(proj, registry))
+
+    @app.route("/api/projects/order", methods=["POST"])
+    def api_projects_reorder():
+        body = request.get_json(force=True) or {}
+        order = body.get("order")
+        if not isinstance(order, list):
+            return jsonify({"ok": False, "error": "missing_order"}), 400
+        applied = registry.set_order([str(x) for x in order])
+        worker.wake()
+        return jsonify({"ok": True, "order": applied})
+
+    @app.route("/api/groups/rename", methods=["POST"])
+    def api_group_rename():
+        body = request.get_json(force=True) or {}
+        old_name = body.get("old_name", "")
+        new_name = body.get("new_name", "").strip()
+        updated = 0
+        for proj in registry.all():
+            if proj.group == old_name:
+                registry.update(proj.id, group=new_name)
+                updated += 1
+        return jsonify({"ok": True, "updated": updated})
+
+    # ----- global cross-project queue (Q panel) -----
+    @app.route("/api/queue", methods=["PUT"])
+    def api_queue_replace():
+        """Full-list replacement. Body: {"items": [{project_id, path}, ...]}.
+        Unknown project IDs are dropped silently; the worker handles stale
+        entries on its next tick anyway."""
+        body = request.get_json(force=True) or {}
+        raw_items = body.get("items", [])
+        items = []
+        for it in raw_items:
+            pid = it.get("project_id") if isinstance(it, dict) else None
+            path = it.get("path") if isinstance(it, dict) else None
+            if pid and path and registry.get(pid):
+                items.append({"project_id": pid, "path": path})
+        applied = registry.global_queue.replace(items)
+        worker.wake()
+        return jsonify({"ok": True, "items": applied})
+
+    @app.route("/api/queue/add", methods=["POST"])
+    def api_queue_add():
+        body = request.get_json(force=True) or {}
+        pid = body.get("project_id")
+        path = body.get("path")
+        position = body.get("position", "back")
+        if not pid or not path:
+            return jsonify({"ok": False, "error": "missing_fields"}), 400
+        if not registry.get(pid):
+            return jsonify({"ok": False, "error": "unknown_project"}), 404
+        added = registry.global_queue.add(pid, path, position=position)
+        worker.wake()
+        return jsonify({"ok": True, "added": added})
+
+    @app.route("/api/queue", methods=["DELETE"])
+    def api_queue_remove():
+        body = request.get_json(force=True) or {}
+        pid = body.get("project_id")
+        path = body.get("path")
+        if not pid or not path:
+            return jsonify({"ok": False, "error": "missing_fields"}), 400
+        removed = registry.global_queue.remove(pid, path)
+        return jsonify({"ok": True, "removed": removed})
+
+    @app.route("/api/queue", methods=["GET"])
+    def api_queue_list():
+        out = []
+        for item in registry.global_queue.list():
+            pid = item["project_id"]
+            path = item["path"]
+            proj = registry.get(pid)
+            row = {
+                "project_id": pid,
+                "project_name": proj.name if proj else "(deleted)",
+                "project_group": proj.group if proj else "",
+                "path": path,
+                "name": Path(path).name,
+                "status": "pending",
+            }
+            if proj:
+                pstate = registry.state(pid)
+                if pstate:
+                    row["status"] = pstate.get_status_for(path)
+            row["missing"] = (not proj) or (not Path(path).exists())
+            out.append(row)
+        return jsonify({"items": out})
 
     @app.route("/api/projects/<pid>", methods=["GET"])
     def api_projects_get(pid):
@@ -195,8 +283,23 @@ def create_app() -> tuple[Flask, Registry, Worker]:
             abort(404)
         state = registry.state(pid)
         rows = annotate_with_state(scan_project(p, state), state)
-        rows = order_files(rows, p.ordering)
+        custom = state.custom_file_order() if p.ordering == "custom" else None
+        rows = order_files(rows, p.ordering, custom)
         return jsonify(rows)
+
+    @app.route("/api/projects/<pid>/files/order", methods=["POST"])
+    def api_files_set_order(pid):
+        p = registry.get(pid)
+        if not p:
+            abort(404)
+        body = request.get_json(force=True) or {}
+        paths = body.get("paths")
+        if not isinstance(paths, list):
+            return jsonify({"ok": False, "error": "missing_paths"}), 400
+        state = registry.state(pid)
+        state.set_custom_file_order([str(x) for x in paths])
+        registry.update(pid, ordering="custom")
+        return jsonify({"ok": True, "ordering": "custom", "paths": state.custom_file_order()})
 
     @app.route("/api/projects/<pid>/transcript")
     def api_transcript(pid):
@@ -627,6 +730,7 @@ def _summary(p: Project, registry: Registry) -> dict:
     return {
         "id": p.id,
         "name": p.name,
+        "group": p.group,
         "auto_run": p.auto_run,
         "ordering": p.ordering,
         "model": p.config.model,

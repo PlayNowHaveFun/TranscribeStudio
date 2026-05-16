@@ -57,6 +57,9 @@ async function pollStatus() {
       state.rendered.projectId = state.selectedProjectId;
     }
     updateLiveData(prev);
+    // Q panel updates independently from the main poll so it can fail
+    // silently without breaking the sidebar/main updates.
+    renderQPanel().catch(() => {});
   } catch (e) {
     setAgentPill("error", "backend offline");
   }
@@ -77,6 +80,16 @@ function setAgentPill(klass, text) {
   $(".status-text", pill).textContent = text;
 }
 
+// Group collapse state persisted in localStorage.
+const COLLAPSED_GROUPS_KEY = "transcribe-studio.collapsed-groups";
+function loadCollapsedGroups() {
+  try { return new Set(JSON.parse(localStorage.getItem(COLLAPSED_GROUPS_KEY) || "[]")); }
+  catch { return new Set(); }
+}
+function saveCollapsedGroups(set) {
+  localStorage.setItem(COLLAPSED_GROUPS_KEY, JSON.stringify([...set]));
+}
+
 function renderSidebar() {
   const s = state.status;
   if (!s) return;
@@ -90,30 +103,154 @@ function renderSidebar() {
   else setAgentPill("idle", "on battery");
 
   const nav = $("#project-nav");
-  // Always re-sync project list — but only if it actually changed (avoid flicker)
-  const wantedIds = s.projects.map(p => p.id);
-  const haveIds = $$(".nav-item[data-pid]", nav).map(el => el.dataset.pid);
-  const sameSet = wantedIds.length === haveIds.length
-                  && wantedIds.every((id, i) => id === haveIds[i]);
-  if (!sameSet) {
-    $$(".nav-item[data-pid]", nav).forEach(el => el.remove());
-    s.projects.forEach(p => {
-      const btn = document.createElement("button");
-      btn.className = "nav-item";
-      btn.dataset.view = "project";
-      btn.dataset.pid = p.id;
-      btn.innerHTML = `<span class="dot"></span>
-                       <span class="label">${escapeHtml(p.name)}</span>
-                       <span class="progress" data-progress></span>`;
-      btn.onclick = () => switchView("project", p.id);
-      nav.appendChild(btn);
+  const dragging = document.querySelector(".sortable-drag, .sortable-ghost");
+
+  // Compute the desired structure: list of {group, projects} in the order
+  // the projects appear in state.status.projects (which mirrors the server's order).
+  const groups = [];
+  const groupIndex = new Map();
+  s.projects.forEach(p => {
+    const g = p.group || "";
+    if (!groupIndex.has(g)) {
+      groupIndex.set(g, groups.length);
+      groups.push({ group: g, projects: [] });
+    }
+    groups[groupIndex.get(g)].projects.push(p);
+  });
+
+  // Cheap structural-equality check: same list of (group, [pids]) as currently rendered?
+  const currentSig = $$(".group-section", nav).map(sec => {
+    const pids = $$(".nav-item[data-pid]", sec).map(el => el.dataset.pid).join(",");
+    return `${sec.dataset.group}::${pids}`;
+  }).join("|");
+  const wantedSig = groups.map(g => `${g.group}::${g.projects.map(p => p.id).join(",")}`).join("|");
+
+  if (currentSig !== wantedSig && !dragging) {
+    // Remove all existing group sections; keep the "All projects" dashboard button.
+    $$(".group-section", nav).forEach(el => el.remove());
+
+    const collapsed = loadCollapsedGroups();
+    groups.forEach(g => {
+      const section = document.createElement("div");
+      section.className = "group-section";
+      section.dataset.group = g.group;
+
+      // Always render a header — even for "" (Ungrouped) — IF there are
+      // multiple groups total; if only the empty group exists, hide the header
+      // to keep the UI clean for users who never use groups.
+      const showHeader = groups.length > 1 || g.group !== "";
+      if (showHeader) {
+        const header = document.createElement("div");
+        header.className = "group-header";
+        header.dataset.group = g.group;
+        const isCollapsed = collapsed.has(g.group);
+        if (isCollapsed) section.classList.add("group-collapsed");
+        header.innerHTML = `
+          <button class="group-caret" type="button" aria-label="Toggle group">${isCollapsed ? "▸" : "▾"}</button>
+          <span class="group-name">${escapeHtml(g.group || "Ungrouped")}</span>
+          <span class="group-count">${g.projects.length}</span>
+        `;
+        section.appendChild(header);
+
+        // Caret click toggles collapse
+        header.querySelector(".group-caret").addEventListener("click", (e) => {
+          e.stopPropagation();
+          const next = !section.classList.contains("group-collapsed");
+          section.classList.toggle("group-collapsed", next);
+          header.querySelector(".group-caret").textContent = next ? "▸" : "▾";
+          const set = loadCollapsedGroups();
+          if (next) set.add(g.group); else set.delete(g.group);
+          saveCollapsedGroups(set);
+        });
+
+        // Dblclick group name to rename. Skip for "Ungrouped" only if user
+        // wants a special case — but allow it; renaming "" to "X" just
+        // assigns group X to all currently-ungrouped projects.
+        const nameEl = header.querySelector(".group-name");
+        nameEl.addEventListener("dblclick", async (e) => {
+          e.stopPropagation();
+          const current = g.group || "";
+          const next = prompt(
+            current === ""
+              ? "Name a new group for all currently ungrouped projects:"
+              : `Rename group "${current}" to:`,
+            current,
+          );
+          if (next === null) return;
+          const trimmed = next.trim();
+          if (trimmed === current) return;
+          try {
+            await api("/api/groups/rename", {
+              method: "POST",
+              body: { old_name: current, new_name: trimmed },
+            });
+            pollStatus();
+          } catch (err) { /* noop */ }
+        });
+      }
+
+      const items = document.createElement("div");
+      items.className = "group-items";
+      items.dataset.group = g.group;
+      section.appendChild(items);
+
+      g.projects.forEach(p => {
+        const btn = renderProjectNavItem(p);
+        items.appendChild(btn);
+      });
+
+      nav.appendChild(section);
+      attachGroupSortable(items);
     });
+
+    // Add a "+ New group" mini-action at the bottom — visible only when
+    // there are projects available, so we have something to drop into it.
+    let plus = nav.querySelector(".new-group-btn");
+    if (!plus && s.projects.length > 0) {
+      plus = document.createElement("button");
+      plus.className = "new-group-btn";
+      plus.type = "button";
+      plus.textContent = "+ New group";
+      plus.addEventListener("click", async () => {
+        const name = prompt("Name the new group:");
+        if (!name) return;
+        const trimmed = name.trim();
+        if (!trimmed) return;
+        // Pick the first ungrouped project to seed the group. If there are none,
+        // ask the user to drag a project in after creation.
+        const ungrouped = s.projects.find(p => !p.group);
+        if (!ungrouped) {
+          alert("Drag a project into this group after creating it. (No ungrouped project to seed.)");
+          return;
+        }
+        try {
+          await api(`/api/projects/${ungrouped.id}`, {
+            method: "PATCH",
+            body: { group: trimmed },
+          });
+          pollStatus();
+        } catch (err) { /* noop */ }
+      });
+      // Insert before sidebar-footer logic — actually nav is a separate element from footer,
+      // so just append to nav (after group sections).
+      nav.appendChild(plus);
+    }
   }
+
   // Update progress numbers in-place
   s.projects.forEach(p => {
     const el = nav.querySelector(`.nav-item[data-pid="${p.id}"] [data-progress]`);
     if (el) el.textContent = `${p.counts.completed}/${p.total}`;
   });
+  // Update names in-place
+  if (!dragging) {
+    s.projects.forEach(p => {
+      const labelEl = nav.querySelector(`.nav-item[data-pid="${p.id}"] .label`);
+      if (labelEl && labelEl.tagName !== "INPUT" && labelEl.textContent !== p.name) {
+        labelEl.textContent = p.name;
+      }
+    });
+  }
   // Active state
   $$(".nav-item", nav).forEach(el => {
     const isActive = (el.dataset.view === state.view) &&
@@ -129,10 +266,192 @@ function renderSidebar() {
   }
 }
 
+function renderProjectNavItem(p) {
+  const btn = document.createElement("button");
+  btn.className = "nav-item";
+  btn.dataset.view = "project";
+  btn.dataset.pid = p.id;
+  btn.innerHTML = `<span class="dot"></span>
+                   <span class="label">${escapeHtml(p.name)}</span>
+                   <span class="progress" data-progress></span>`;
+  btn.onclick = (ev) => {
+    if (btn.dataset.justDragged === "1") { btn.dataset.justDragged = ""; return; }
+    if (ev.target.tagName === "INPUT") return;
+    switchView("project", p.id);
+  };
+  attachLabelRename(btn);
+  return btn;
+}
+
+// Attach Sortable to one .group-items container. Shared "group: projects" name
+// allows cross-container drag for moving projects between groups.
+function attachGroupSortable(itemsEl) {
+  if (typeof Sortable === "undefined") return;
+  if (itemsEl._sortable) { itemsEl._sortable.destroy(); itemsEl._sortable = null; }
+  itemsEl._sortable = Sortable.create(itemsEl, {
+    group: "projects",
+    draggable: ".nav-item[data-pid]",
+    animation: 150,
+    ghostClass: "drag-ghost",
+    chosenClass: "drag-chosen",
+    dragClass: "drag-active",
+    onStart: (evt) => { evt.item.dataset.justDragged = "1"; },
+    onEnd: async (evt) => {
+      const movedPid = evt.item.dataset.pid;
+      const destGroup = evt.to.dataset.group || "";
+      const flatOrder = $$("#project-nav .nav-item[data-pid]").map(el => el.dataset.pid);
+      const tasks = [
+        api("/api/projects/order", { method: "POST", body: { order: flatOrder } }),
+      ];
+      if (evt.from !== evt.to) {
+        tasks.push(api(`/api/projects/${movedPid}`, {
+          method: "PATCH",
+          body: { group: destGroup },
+        }));
+      }
+      try { await Promise.all(tasks); } catch (e) { /* noop */ }
+      pollStatus();
+    },
+  });
+}
+
+// Dblclick the .label span on a project nav-item to rename it inline.
+function attachLabelRename(btn) {
+  const label = btn.querySelector(".label");
+  if (!label) return;
+  label.addEventListener("dblclick", (ev) => {
+    ev.stopPropagation();
+    if (label.querySelector("input")) return;
+    const original = label.textContent;
+    const input = document.createElement("input");
+    input.type = "text";
+    input.value = original;
+    input.className = "label-rename-input";
+    label.textContent = "";
+    label.appendChild(input);
+    input.focus();
+    input.select();
+
+    const commit = async () => {
+      const next = input.value.trim();
+      label.textContent = next || original;
+      if (next && next !== original) {
+        try {
+          await api(`/api/projects/${btn.dataset.pid}`, {
+            method: "PATCH",
+            body: { name: next },
+          });
+        } catch (e) {
+          label.textContent = original;
+        }
+      }
+    };
+    const cancel = () => { label.textContent = original; };
+
+    input.addEventListener("keydown", (e) => {
+      if (e.key === "Enter") { e.preventDefault(); input.blur(); }
+      else if (e.key === "Escape") { e.preventDefault(); cancel(); input.removeEventListener("blur", commit); input.blur(); }
+    });
+    input.addEventListener("blur", commit, { once: true });
+    input.addEventListener("click", (e) => e.stopPropagation());
+  });
+}
+
 function switchView(view, pid) {
   state.view = view;
   state.selectedProjectId = pid;
   pollStatus();
+}
+
+// ---------- Q panel (global cross-project queue) ----------
+
+async function renderQPanel() {
+  const list = $("#qpanel-list");
+  const countEl = $("#qpanel-count");
+  if (!list) return;
+  // Don't rebuild while the user is mid-drag
+  if (document.querySelector(".sortable-drag, .sortable-ghost")) return;
+
+  let data;
+  try {
+    data = await api("/api/queue");
+  } catch (e) {
+    return;
+  }
+  const items = data.items || [];
+  if (countEl) countEl.textContent = String(items.length);
+
+  if (items.length === 0) {
+    list.innerHTML = `<div class="qpanel-empty">No items queued. Use the queue button on a file row to add one.</div>`;
+    list.dataset.sig = "";
+    return;
+  }
+
+  // Build a signature for cheap rebuild check
+  const wantedSig = items.map(it => `${it.project_id}::${it.path}::${it.status}::${it.missing?1:0}`).join("|");
+  if (list.dataset.sig === wantedSig) return;
+  list.dataset.sig = wantedSig;
+
+  list.innerHTML = "";
+  items.forEach(it => {
+    const row = document.createElement("div");
+    row.className = "q-row";
+    row.dataset.pid = it.project_id;
+    row.dataset.path = it.path;
+    if (it.missing) row.classList.add("missing");
+    const statusClass = (it.status || "").replace(/[^a-z_]/g, "");
+    row.innerHTML = `
+      <div class="q-name" title="${escapeHtml(it.path)}">${escapeHtml(it.name)}</div>
+      <div class="q-meta">
+        <span class="q-project">${escapeHtml(it.project_name)}</span>
+        <span class="q-status ${statusClass}">${escapeHtml(it.status || "")}</span>
+        <button class="q-remove btn-icon" type="button" title="Remove from queue">×</button>
+      </div>
+    `;
+    row.addEventListener("click", (ev) => {
+      if (row.dataset.justDragged === "1") { row.dataset.justDragged = ""; return; }
+      if (ev.target.classList.contains("q-remove")) return;
+      switchView("project", it.project_id);
+    });
+    row.querySelector(".q-remove").addEventListener("click", async (ev) => {
+      ev.stopPropagation();
+      try {
+        await api("/api/queue", {
+          method: "DELETE",
+          body: { project_id: it.project_id, path: it.path },
+        });
+      } catch (e) { /* noop */ }
+      pollStatus();
+    });
+    list.appendChild(row);
+  });
+
+  attachQPanelSortable(list);
+}
+
+function attachQPanelSortable(list) {
+  if (typeof Sortable === "undefined") return;
+  if (list._sortable) { list._sortable.destroy(); list._sortable = null; }
+  list._sortable = Sortable.create(list, {
+    draggable: ".q-row",
+    animation: 150,
+    ghostClass: "drag-ghost",
+    chosenClass: "drag-chosen",
+    dragClass: "drag-active",
+    onStart: (evt) => { evt.item.dataset.justDragged = "1"; },
+    onEnd: async () => {
+      const items = $$(".q-row", list).map(el => ({
+        project_id: el.dataset.pid,
+        path: el.dataset.path,
+      }));
+      try {
+        await api("/api/queue", { method: "PUT", body: { items } });
+      } catch (e) { /* noop */ }
+      // Bust the signature so the next poll re-syncs status pills
+      list.dataset.sig = "";
+      pollStatus();
+    },
+  });
 }
 
 // ---------- content (structure rendered once per view; live data patched) ----------
@@ -516,6 +835,8 @@ function renderSourceTabsInto(containerId) {
 function renderFileListFromCache() {
   const list = $("#file-list");
   if (!list) return;
+  // Skip rebuild while a drag is in progress (Sortable manages DOM order live)
+  if (document.querySelector("#file-list .sortable-drag, #file-list .sortable-ghost")) return;
 
   // Render/update the source-type tab bar
   renderSourceTabsInto("source-tabs-bar");
@@ -555,9 +876,39 @@ function renderFileListFromCache() {
     <thead><tr>
       <th>File</th><th>Folder</th><th>Size</th><th>Modified</th><th>Status</th><th></th>
     </tr></thead>
-    <tbody>${rows.map(fileRow).join("")}</tbody>
+    <tbody id="file-list-tbody">${rows.map(fileRow).join("")}</tbody>
   </table>`;
   bindFileRowHandlers();
+  attachFileTableSortable();
+}
+
+function attachFileTableSortable() {
+  if (typeof Sortable === "undefined") return;
+  const tbody = $("#file-list-tbody");
+  if (!tbody) return;
+  if (tbody._sortable) { tbody._sortable.destroy(); tbody._sortable = null; }
+  const pid = state.selectedProjectId;
+  if (!pid) return;
+  tbody._sortable = Sortable.create(tbody, {
+    draggable: "tr[data-path]",
+    animation: 150,
+    ghostClass: "drag-ghost",
+    chosenClass: "drag-chosen",
+    dragClass: "drag-active",
+    onStart: (evt) => { evt.item.dataset.justDragged = "1"; },
+    onEnd: async () => {
+      const paths = $$("#file-list-tbody tr[data-path]").map(tr => tr.dataset.path);
+      try {
+        await api(`/api/projects/${pid}/files/order`, {
+          method: "POST",
+          body: { paths },
+        });
+      } catch (e) { /* noop */ }
+      // Force the cache to refresh so server-side custom order reflects
+      state.fileListLastFetchedAt = 0;
+      pollStatus();
+    },
+  });
 }
 
 function renderMusicCard(file) {
@@ -644,7 +995,8 @@ function fileRow(r) {
     <td>${statusTag}</td>
     <td><div class="actions">
       ${r.has_transcript ? '<button class="btn-icon action-view" title="View transcript">view</button>' : ""}
-      ${r.status === "pending" ? '<button class="btn-icon action-priority" title="Move to front of queue">↑</button>' : ""}
+      ${r.status === "pending" || r.status === "failed" ? '<button class="btn-icon action-addq" title="Add to global queue">+Q</button>' : ""}
+      ${r.status === "pending" ? '<button class="btn-icon action-priority" title="Move to front of project queue">↑</button>' : ""}
       ${r.has_transcript ? '<button class="btn-icon action-redo" title="Re-transcribe">redo</button>' : ""}
       ${r.status === "pending" || r.status === "failed" ? '<button class="btn-icon action-skip" title="Skip">skip</button>' : ""}
     </div></td>
@@ -660,6 +1012,16 @@ function bindFileRowHandlers() {
     $(".action-priority", tr)?.addEventListener("click", e => {
       e.stopPropagation();
       api(`/api/projects/${pid}/prioritize`, { method: "POST", body: { paths: [path] } });
+    });
+    $(".action-addq", tr)?.addEventListener("click", async e => {
+      e.stopPropagation();
+      try {
+        await api("/api/queue/add", {
+          method: "POST",
+          body: { project_id: pid, path, position: "back" },
+        });
+      } catch (err) { /* noop */ }
+      pollStatus();
     });
     $(".action-redo", tr)?.addEventListener("click", e => {
       e.stopPropagation();
