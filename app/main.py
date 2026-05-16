@@ -210,6 +210,23 @@ def create_app() -> tuple[Flask, Registry, Worker]:
             worker.wake()
         return jsonify({"new_files": new_files, "total": len(new_files)})
 
+    @app.route("/api/refresh-all", methods=["POST"])
+    def api_refresh_all():
+        results = []
+        total_new = 0
+        for p in registry.all():
+            state = registry.state(p.id)
+            new_files = _scan_for_new_files(p, state)
+            total_new += len(new_files)
+            results.append({"id": p.id, "name": p.name, "new_files": new_files})
+        _write_log_line(
+            LOG_PATH,
+            f"REFRESH-ALL discovered {total_new} new files across {len(results)} project(s)",
+        )
+        if total_new:
+            worker.wake()
+        return jsonify({"projects": results, "total_new": total_new, "project_count": len(results)})
+
     @app.route("/api/projects/<pid>/transcript")
     def api_transcript(pid):
         p = registry.get(pid)

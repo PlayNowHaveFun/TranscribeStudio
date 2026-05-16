@@ -381,7 +381,8 @@ function renderHeaderActions(paused) {
   const refreshBtn = state.view === "project"
     ? `<button class="btn-secondary" id="btn-refresh-project">↻ Refresh</button>
        <span class="muted small" id="refresh-status" style="margin-left:8px;"></span>`
-    : "";
+    : `<button class="btn-secondary" id="btn-refresh-all">↻ Refresh all</button>
+       <span class="muted small" id="refresh-status" style="margin-left:8px;"></span>`;
   target.innerHTML = `
     ${refreshBtn}
     ${paused
@@ -392,6 +393,25 @@ function renderHeaderActions(paused) {
     api("/api/resume", { method: "POST" }).then(pollStatus);
   if ($("#btn-pause")) $("#btn-pause").onclick = () =>
     api("/api/pause", { method: "POST" }).then(pollStatus);
+  if ($("#btn-refresh-all")) $("#btn-refresh-all").onclick = async () => {
+    const btn = $("#btn-refresh-all");
+    const status = $("#refresh-status");
+    btn.disabled = true;
+    status.textContent = "Scanning all projects…";
+    try {
+      const res = await api("/api/refresh-all", { method: "POST", body: {} });
+      const n = res.total_new || 0;
+      const m = res.project_count || 0;
+      status.textContent = n
+        ? `Found ${n} new file${n === 1 ? "" : "s"} across ${m} project${m === 1 ? "" : "s"}`
+        : `No new files in ${m} project${m === 1 ? "" : "s"}`;
+      pollStatus();
+    } catch (e) {
+      status.textContent = "Refresh failed";
+    } finally {
+      btn.disabled = false;
+    }
+  };
   if ($("#btn-refresh-project")) $("#btn-refresh-project").onclick = async () => {
     const pid = state.selectedProjectId;
     if (!pid) return;
