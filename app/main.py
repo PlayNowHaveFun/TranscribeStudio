@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import socket
 import subprocess
 import sys
@@ -152,7 +153,7 @@ def create_app() -> tuple[Flask, Registry, Worker]:
         proj = Project(
             id=pid,
             name=body["name"],
-            folders=body.get("folders", []),
+            folders=_normalize_folder_input(body.get("folders", [])),
             config=WhisperConfig(**cfg_dict),
             auto_run=body.get("auto_run", True),
             require_ac_power=body.get("require_ac_power", True),
@@ -182,6 +183,8 @@ def create_app() -> tuple[Flask, Registry, Worker]:
     @app.route("/api/projects/<pid>", methods=["PATCH"])
     def api_projects_update(pid):
         body = request.get_json(force=True)
+        if "folders" in body:
+            body["folders"] = _normalize_folder_input(body["folders"])
         p = registry.update(pid, **body)
         if not p:
             abort(404)
@@ -666,6 +669,58 @@ def create_app() -> tuple[Flask, Registry, Worker]:
     return app, registry, worker
 
 
+def _unescape_shell_path(s: str) -> str:
+    """Strip shell-escape backslashes from a copy-pasted path.
+
+    Terminal paths often contain "\\ ", "\\@", "\\(", etc. — when pasted
+    into the folders textarea those backslashes get stored literally and
+    Path() walks a non-existent directory. We drop single-backslash
+    escapes but preserve "\\\\" → "\\" so paths with intentional
+    backslashes (rare on macOS) survive.
+    """
+    if not s or "\\" not in s:
+        return s
+    PLACEHOLDER = "\x00"
+    s = s.replace("\\\\", PLACEHOLDER)
+    s = re.sub(r"\\(.)", r"\1", s)
+    return s.replace(PLACEHOLDER, "\\")
+
+
+def _normalize_folder_input(folders: list[str]) -> list[str]:
+    """Apply path normalization to a folders list submitted via the API.
+    Empty/whitespace-only entries are dropped; backslash-escapes are removed.
+    """
+    out = []
+    for f in folders or []:
+        clean = _unescape_shell_path((f or "").strip())
+        if clean:
+            out.append(clean)
+    return out
+
+
+def _migrate_escaped_folder_paths(registry: Registry, log_path: Path) -> None:
+    """One-shot startup migration: if a project's folder path doesn't exist
+    on disk but its un-shell-escaped version does, rewrite it. Logs every
+    change. Safe to run repeatedly — only mutates when the fix verifiably
+    points at a real directory."""
+    for p in registry.all():
+        changed = False
+        new_folders: list[str] = []
+        for orig in p.folders:
+            if Path(orig).expanduser().exists():
+                new_folders.append(orig)
+                continue
+            fixed = _unescape_shell_path(orig)
+            if fixed != orig and Path(fixed).expanduser().exists():
+                _write_log_line(log_path, f"MIGRATE [{p.id}] folder {orig!r} -> {fixed!r}")
+                new_folders.append(fixed)
+                changed = True
+            else:
+                new_folders.append(orig)
+        if changed:
+            registry.update(p.id, folders=new_folders)
+
+
 def _scan_for_new_files(project: Project, state) -> list[str]:
     """Return absolute paths of files visible on disk that the queue hasn't
     seen yet (status == 'pending'). Used by all refresh entry points.
@@ -755,6 +810,7 @@ def _startup_scan(registry: Registry, log_path: Path) -> None:
 
 def main():
     app, registry, worker = create_app()
+    _migrate_escaped_folder_paths(registry, LOG_PATH)
     _startup_scan(registry, LOG_PATH)
     worker.start()
     watcher = Watcher(registry, worker, LOG_PATH)
