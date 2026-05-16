@@ -82,7 +82,13 @@ function renderSidebar() {
   if (!s) return;
   const w = s.worker;
   const sys = s.system;
-  $("#port-info").textContent = `${sys.host}:${sys.port}`;
+  const v = sys.version || {};
+  const ver = v.sha
+    ? `${v.branch}@${v.sha}${v.dirty ? "*" : ""}${v.is_canonical ? "" : " · worktree"}`
+    : "";
+  $("#port-info").innerHTML =
+    `${sys.host}:${sys.port}` +
+    (ver ? `<br><span title="${escapeAttr(v.checkout || "")}">${escapeHtml(ver)}</span>` : "");
 
   if (w.paused) setAgentPill("paused", "paused");
   else if (w.running) setAgentPill("running", "running");

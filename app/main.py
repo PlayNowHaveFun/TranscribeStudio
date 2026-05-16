@@ -26,6 +26,7 @@ from .engine import (
 from .projects import Project, Registry, slugify, STUDIO_ROOT
 from .scanner import scan_project, order_files, annotate_with_state, next_pending
 from .transcriber import Worker
+from .version import VERSION
 from .watcher import Watcher
 
 
@@ -101,6 +102,7 @@ def create_app() -> tuple[Flask, Registry, Worker]:
                 "models_dir": str(Path.home() / "Documents/cowork-tools/whisper-models"),
                 "host": HOST,
                 "port": PORT,
+                "version": VERSION,
             },
         })
 
