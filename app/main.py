@@ -198,6 +198,18 @@ def create_app() -> tuple[Flask, Registry, Worker]:
         rows = order_files(rows, p.ordering)
         return jsonify(rows)
 
+    @app.route("/api/projects/<pid>/refresh", methods=["POST"])
+    def api_projects_refresh(pid):
+        p = registry.get(pid)
+        if not p:
+            abort(404)
+        state = registry.state(pid)
+        new_files = _scan_for_new_files(p, state)
+        _write_log_line(LOG_PATH, f"REFRESH [{pid}] discovered {len(new_files)} new files")
+        if new_files:
+            worker.wake()
+        return jsonify({"new_files": new_files, "total": len(new_files)})
+
     @app.route("/api/projects/<pid>/transcript")
     def api_transcript(pid):
         p = registry.get(pid)
@@ -627,6 +639,29 @@ def create_app() -> tuple[Flask, Registry, Worker]:
         return jsonify({"lines": [l.rstrip() for l in lines[-n:]]})
 
     return app, registry, worker
+
+
+def _scan_for_new_files(project: Project, state) -> list[str]:
+    """Return absolute paths of files visible on disk that the queue hasn't
+    seen yet (status == 'pending'). Used by all refresh entry points.
+
+    Reuses scan_project + annotate_with_state so a "new file" is defined
+    exactly the same way the worker defines one — no second source of truth.
+    """
+    rows = annotate_with_state(scan_project(project, state), state)
+    return [r["path"] for r in rows if r["status"] == "pending"]
+
+
+def _write_log_line(log_path: Path, msg: str) -> None:
+    """Append one line to studio.log. Mirrors Worker._log()'s format so
+    refresh/startup messages sit in the same timeline as worker events."""
+    from datetime import datetime
+    ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    try:
+        with open(log_path, "a") as f:
+            f.write(f"{ts}  {msg}\n")
+    except Exception:
+        pass
 
 
 def _summary(p: Project, registry: Registry) -> dict:

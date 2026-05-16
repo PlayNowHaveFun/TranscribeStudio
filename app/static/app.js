@@ -378,13 +378,40 @@ function updateProjectLive(prevStatus) {
 function renderHeaderActions(paused) {
   const target = $("#header-actions");
   if (!target) return;
-  target.innerHTML = paused
-    ? `<button class="btn-primary" id="btn-resume">▶ Resume</button>`
-    : `<button class="btn-secondary" id="btn-pause">⏸ Pause</button>`;
+  const refreshBtn = state.view === "project"
+    ? `<button class="btn-secondary" id="btn-refresh-project">↻ Refresh</button>
+       <span class="muted small" id="refresh-status" style="margin-left:8px;"></span>`
+    : "";
+  target.innerHTML = `
+    ${refreshBtn}
+    ${paused
+      ? `<button class="btn-primary" id="btn-resume">▶ Resume</button>`
+      : `<button class="btn-secondary" id="btn-pause">⏸ Pause</button>`}
+  `;
   if ($("#btn-resume")) $("#btn-resume").onclick = () =>
     api("/api/resume", { method: "POST" }).then(pollStatus);
   if ($("#btn-pause")) $("#btn-pause").onclick = () =>
     api("/api/pause", { method: "POST" }).then(pollStatus);
+  if ($("#btn-refresh-project")) $("#btn-refresh-project").onclick = async () => {
+    const pid = state.selectedProjectId;
+    if (!pid) return;
+    const btn = $("#btn-refresh-project");
+    const status = $("#refresh-status");
+    btn.disabled = true;
+    status.textContent = "Scanning…";
+    try {
+      const res = await api(`/api/projects/${pid}/refresh`, { method: "POST", body: {} });
+      const n = res.total || 0;
+      status.textContent = n ? `Found ${n} new file${n === 1 ? "" : "s"}` : "No new files";
+      state.fileListLastFetchedAt = 0;  // bust the 15s cache
+      fetchAndRenderFileList(pid);
+      pollStatus();
+    } catch (e) {
+      status.textContent = "Refresh failed";
+    } finally {
+      btn.disabled = false;
+    }
+  };
 }
 
 // ---------- now playing ----------
