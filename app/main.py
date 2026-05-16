@@ -726,8 +726,28 @@ def _full(p: Project, registry: Registry) -> dict:
     return {**p.to_dict(), "summary": _summary(p, registry)}
 
 
+def _startup_scan(registry: Registry, log_path: Path) -> None:
+    """Walk every project's folders once at launch and log how many new
+    files are visible to the queue. Runs BEFORE worker.start() so the
+    log line lands first in the timeline; no need to wake (worker is
+    about to tick anyway)."""
+    projects = registry.all()
+    total_new = 0
+    for p in projects:
+        state = registry.state(p.id)
+        new_files = _scan_for_new_files(p, state)
+        if new_files:
+            _write_log_line(log_path, f"STARTUP [{p.id}] discovered {len(new_files)} new files")
+        total_new += len(new_files)
+    _write_log_line(
+        log_path,
+        f"STARTUP scan: discovered {total_new} new files across {len(projects)} project(s)",
+    )
+
+
 def main():
     app, registry, worker = create_app()
+    _startup_scan(registry, LOG_PATH)
     worker.start()
     # Auto-open browser if no other instance is running this port
     if "--no-browser" not in sys.argv:
