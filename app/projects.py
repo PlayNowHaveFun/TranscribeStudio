@@ -21,6 +21,7 @@ from .engine import WhisperConfig, ALL_EXT
 STUDIO_ROOT = Path.home() / "Documents/cowork-tools/transcribe-studio"
 DATA_DIR = STUDIO_ROOT / "data"
 PROJECTS_FILE = DATA_DIR / "projects.json"
+GLOBAL_QUEUE_FILE = DATA_DIR / "global_queue.json"
 
 
 # --------------------------------------------------------------------------
@@ -58,9 +59,10 @@ class Project:
     require_ac_power: bool = True
     required_volumes: list[str] = field(default_factory=list)  # paths that must be mounted
     exclude_patterns: list[str] = field(default_factory=list)  # globs to skip
-    ordering: str = "newest_first"             # "newest_first" | "oldest_first" | "alpha"
+    ordering: str = "newest_first"             # "newest_first" | "oldest_first" | "alpha" | "custom"
     created_at: str = field(default_factory=lambda: datetime.now().isoformat())
     notes: str = ""
+    group: str = ""                            # free-form group label; "" = ungrouped
 
     # --- YouTube ingest (added per SPEC_YOUTUBE_AND_MUSIC.md) ---
     # All default to "off" so existing projects load unchanged.
@@ -105,6 +107,7 @@ class Project:
             ordering=d.get("ordering", "newest_first"),
             created_at=d.get("created_at", datetime.now().isoformat()),
             notes=d.get("notes", ""),
+            group=d.get("group", ""),
             # YouTube fields — .get() with defaults so old projects.json loads unchanged
             youtube_enabled=d.get("youtube_enabled", False),
             youtube_default_mode=d.get("youtube_default_mode", "speech"),
@@ -145,12 +148,13 @@ class ProjectState:
         # Defaults — every key gets set if missing so older state.json
         # files (pre-YouTube) self-heal on first load without a migration.
         defaults = {
-            "completed": {},      # path -> {completed_at, duration_sec}
-            "failed": {},         # path -> {failed_at, reason, attempts}
-            "priority_queue": [], # paths to process next regardless of order
-            "skipped": {},        # paths the user marked as skip (not pending)
-            "current": None,      # currently in progress, if any
-            "youtube_urls": [],   # list of url-job dicts (see add_url)
+            "completed": {},          # path -> {completed_at, duration_sec}
+            "failed": {},             # path -> {failed_at, reason, attempts}
+            "priority_queue": [],     # paths to process next regardless of order
+            "skipped": {},            # paths the user marked as skip (not pending)
+            "current": None,          # currently in progress, if any
+            "youtube_urls": [],       # list of url-job dicts (see add_url)
+            "custom_file_order": [],  # user-chosen display order (used when project.ordering == "custom")
         }
         for k, v in defaults.items():
             loaded.setdefault(k, v)
@@ -246,6 +250,15 @@ class ProjectState:
 
     def deprioritize(self, path: str):
         self._data["priority_queue"] = [p for p in self._data["priority_queue"] if p != path]
+        self._save()
+
+    def custom_file_order(self) -> list[str]:
+        with self._lock:
+            return list(self._data.get("custom_file_order", []))
+
+    def set_custom_file_order(self, paths: list[str]):
+        with self._lock:
+            self._data["custom_file_order"] = [str(p) for p in paths]
         self._save()
 
     # ------------------------------------------------------------------
@@ -360,21 +373,35 @@ class Registry:
         DATA_DIR.mkdir(parents=True, exist_ok=True)
         self._projects: dict[str, Project] = {}
         self._states: dict[str, ProjectState] = {}
+        self.global_queue = GlobalQueue()
         self._load()
 
     def _load(self):
         if PROJECTS_FILE.exists():
             try:
                 data = json.loads(PROJECTS_FILE.read_text())
+                loaded: dict[str, Project] = {}
                 for d in data.get("projects", []):
                     p = Project.from_dict(d)
-                    self._projects[p.id] = p
-                    self._states[p.id] = ProjectState(p)
+                    loaded[p.id] = p
+                # Apply explicit order if present; unknown IDs ignored,
+                # projects missing from the order array are appended in load order.
+                order = [pid for pid in data.get("order", []) if pid in loaded]
+                for pid in loaded.keys():
+                    if pid not in order:
+                        order.append(pid)
+                for pid in order:
+                    p = loaded[pid]
+                    self._projects[pid] = p
+                    self._states[pid] = ProjectState(p)
             except Exception as e:
                 print(f"Failed to load projects.json: {e}")
 
     def _save(self):
-        data = {"projects": [p.to_dict() for p in self._projects.values()]}
+        data = {
+            "order": list(self._projects.keys()),
+            "projects": [p.to_dict() for p in self._projects.values()],
+        }
         tmp = PROJECTS_FILE.with_suffix(".json.tmp")
         tmp.write_text(json.dumps(data, indent=2))
         tmp.replace(PROJECTS_FILE)
@@ -420,7 +447,114 @@ class Registry:
             del self._projects[project_id]
             self._states.pop(project_id, None)
             self._save()
+        # Drop any cross-project queue entries that referenced this project.
+        self.global_queue.prune_project(project_id)
         return True
+
+    def set_order(self, order: list[str]) -> list[str]:
+        """Reorder projects to match `order`. Unknown IDs ignored; missing IDs
+        appended at the end in their current relative order. Returns the
+        applied order."""
+        with self._lock:
+            wanted = [pid for pid in order if pid in self._projects]
+            for pid in self._projects.keys():
+                if pid not in wanted:
+                    wanted.append(pid)
+            self._projects = {pid: self._projects[pid] for pid in wanted}
+            self._save()
+            return list(self._projects.keys())
+
+
+# --------------------------------------------------------------------------
+# GlobalQueue — cross-project ranked queue of files to transcribe.
+# Lives outside the per-project priority_queue: it is the user's interleaved
+# "transcribe these in this order regardless of which project they're in"
+# intent. The worker consults this list FIRST every tick (after URL jobs),
+# then falls back to the existing per-project priority/natural-order loop.
+# --------------------------------------------------------------------------
+
+class GlobalQueue:
+    """Thread-safe, file-backed ordered list of (project_id, path) items."""
+
+    def __init__(self, path: Path = GLOBAL_QUEUE_FILE):
+        self.path = path
+        self._lock = threading.Lock()
+        self._items: list[dict] = []
+        self._load()
+
+    def _load(self):
+        if self.path.exists():
+            try:
+                data = json.loads(self.path.read_text())
+                self._items = [
+                    {"project_id": str(it["project_id"]), "path": str(it["path"])}
+                    for it in data.get("items", [])
+                    if it.get("project_id") and it.get("path")
+                ]
+            except Exception as e:
+                print(f"Failed to load global_queue.json: {e}")
+                self._items = []
+
+    def _save(self):
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+        tmp = self.path.with_suffix(".json.tmp")
+        tmp.write_text(json.dumps({"items": self._items}, indent=2))
+        tmp.replace(self.path)
+
+    def list(self) -> list[dict]:
+        with self._lock:
+            return [dict(it) for it in self._items]
+
+    def replace(self, items: list[dict]) -> list[dict]:
+        """Replace the entire queue with `items`. Each item must have
+        project_id + path. Duplicates are kept (caller's responsibility)."""
+        with self._lock:
+            self._items = [
+                {"project_id": str(it["project_id"]), "path": str(it["path"])}
+                for it in items
+                if it.get("project_id") and it.get("path")
+            ]
+            self._save()
+            return [dict(it) for it in self._items]
+
+    def add(self, project_id: str, path: str, position: str = "back") -> bool:
+        """Add (project_id, path) to the queue. Idempotent — already-present
+        items aren't duplicated. position='front' inserts at the head.
+        Returns True if added, False if it was already present."""
+        with self._lock:
+            for it in self._items:
+                if it["project_id"] == project_id and it["path"] == path:
+                    return False
+            entry = {"project_id": project_id, "path": path}
+            if position == "front":
+                self._items.insert(0, entry)
+            else:
+                self._items.append(entry)
+            self._save()
+            return True
+
+    def remove(self, project_id: str, path: str) -> bool:
+        with self._lock:
+            before = len(self._items)
+            self._items = [
+                it for it in self._items
+                if not (it["project_id"] == project_id and it["path"] == path)
+            ]
+            if len(self._items) == before:
+                return False
+            self._save()
+            return True
+
+    def prune_project(self, project_id: str) -> int:
+        """Drop all entries belonging to `project_id` (e.g., when a project
+        is deleted). Returns the count removed."""
+        with self._lock:
+            before = len(self._items)
+            self._items = [it for it in self._items if it["project_id"] != project_id]
+            removed = before - len(self._items)
+            if removed:
+                self._save()
+            return removed
 
 
 def slugify(name: str) -> str:

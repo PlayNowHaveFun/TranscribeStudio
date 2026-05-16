@@ -101,11 +101,20 @@ def scan_project(project: Project, state: "Optional[ProjectState]" = None) -> li
     return rows
 
 
-def order_files(rows: list[dict], ordering: str) -> list[dict]:
+def order_files(rows: list[dict], ordering: str, custom_order: list[str] | None = None) -> list[dict]:
     if ordering == "oldest_first":
         return sorted(rows, key=lambda r: r["mtime"])
     if ordering == "alpha":
         return sorted(rows, key=lambda r: r["name"].lower())
+    if ordering == "custom" and custom_order:
+        # Stable: rows whose path is in custom_order come first in that order,
+        # then any rows not yet in custom_order keep their natural (newest-first) tail.
+        index = {p: i for i, p in enumerate(custom_order)}
+        keyed = [(index.get(r["path"], None), r) for r in rows]
+        in_custom = [r for i, r in keyed if i is not None]
+        in_custom.sort(key=lambda r: index[r["path"]])
+        rest = sorted([r for i, r in keyed if i is None], key=lambda r: r["mtime"], reverse=True)
+        return in_custom + rest
     # default: newest first
     return sorted(rows, key=lambda r: r["mtime"], reverse=True)
 
@@ -131,8 +140,9 @@ def next_pending(project: Project, state: ProjectState) -> Optional[dict]:
             if r["path"] == path and r["status"] in ("pending", "queued", "failed"):
                 return r
 
-    # 2) Natural order, first non-completed/non-skipped
-    for r in order_files(rows, project.ordering):
+    # 2) Natural order (or user-chosen custom order), first non-completed/non-skipped
+    custom = state.custom_file_order() if project.ordering == "custom" else None
+    for r in order_files(rows, project.ordering, custom):
         if r["status"] in ("pending", "queued"):
             return r
     # Optionally: retry failed (capped attempts) — let UI decide

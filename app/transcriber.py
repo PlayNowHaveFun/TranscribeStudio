@@ -195,6 +195,37 @@ class Worker:
             self._process_url_job(project, state, url_row)
             return
 
+        # Step 2: global cross-project queue. Walk it in order; first eligible
+        # item wins. Stale entries (project deleted, file missing, already
+        # completed/in_progress/skipped) are GC'd here. Eligibility uses the
+        # same _conditions_met gate as the per-project loop.
+        gq = self.registry.global_queue
+        for q_item in gq.list():
+            pid, q_path = q_item["project_id"], q_item["path"]
+            q_project = self.registry.get(pid)
+            if q_project is None:
+                gq.remove(pid, q_path)
+                continue
+            if not Path(q_path).exists():
+                gq.remove(pid, q_path)
+                continue
+            q_state = self.registry.state(pid)
+            if q_state is None:
+                gq.remove(pid, q_path)
+                continue
+            q_status = q_state.get_status_for(q_path)
+            if q_status in ("completed", "in_progress", "skipped"):
+                gq.remove(pid, q_path)
+                continue
+            ok, _reason = self._conditions_met(q_project)
+            if not ok:
+                continue  # not GC — try next entry, conditions may differ per project
+            # Winner — remove on dispatch (not completion), then process.
+            gq.remove(pid, q_path)
+            self._set_reason("running (global queue)")
+            self._process(q_project, q_state, q_path)
+            return
+
         if file_candidate is not None:
             project, state, row = file_candidate
             self._set_reason("running")
