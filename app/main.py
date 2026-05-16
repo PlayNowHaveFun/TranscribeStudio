@@ -76,10 +76,15 @@ def _bootstrap_default_projects(registry: Registry) -> None:
 
 
 def create_app() -> tuple[Flask, Registry, Worker]:
+    # Resolve templates + static relative to the running checkout, NOT
+    # STUDIO_ROOT (which is the canonical-install path). Otherwise a
+    # worktree's Python serves the canonical install's frontend assets
+    # and edits to JS/HTML never reach the browser.
+    app_dir = Path(__file__).resolve().parent
     app = Flask(
         __name__,
-        template_folder=str(STUDIO_ROOT / "app" / "templates"),
-        static_folder=str(STUDIO_ROOT / "app" / "static"),
+        template_folder=str(app_dir / "templates"),
+        static_folder=str(app_dir / "static"),
     )
     registry = Registry()
     _bootstrap_default_projects(registry)
