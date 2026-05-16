@@ -26,6 +26,7 @@ from .engine import (
 from .projects import Project, Registry, slugify, STUDIO_ROOT
 from .scanner import scan_project, order_files, annotate_with_state, next_pending
 from .transcriber import Worker
+from .watcher import Watcher
 
 
 PORT = 5180
@@ -749,6 +750,8 @@ def main():
     app, registry, worker = create_app()
     _startup_scan(registry, LOG_PATH)
     worker.start()
+    watcher = Watcher(registry, worker, LOG_PATH)
+    watcher.start()
     # Auto-open browser if no other instance is running this port
     if "--no-browser" not in sys.argv:
         try:
@@ -763,6 +766,7 @@ def main():
     try:
         app.run(host=HOST, port=PORT, debug=False, threaded=True, use_reloader=False)
     finally:
+        watcher.stop()
         worker.stop()
 
 

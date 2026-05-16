@@ -17,9 +17,8 @@ from .yt_ingest import YtIngest, YtIngestConfig, YtIngestError
 
 
 # How often to re-evaluate projects when nothing's pending or conditions
-# aren't met. Configurable via UI.
+# aren't met. The 5-minute periodic rescan lives in app/watcher.py now.
 DEFAULT_IDLE_SLEEP = 30
-DEFAULT_RESCAN_SEC = 300  # 5 min — also rebuilds the file list from disk
 
 
 class Worker:
