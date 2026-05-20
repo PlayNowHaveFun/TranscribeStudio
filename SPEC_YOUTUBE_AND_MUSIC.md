@@ -28,8 +28,15 @@ Two operator-visible capabilities:
 - Karaoke video rendering (instrumental + burned-in subtitles → `.mp4`)
 - ~~Playlist support~~ — **shipped** (May 2026, public/unlisted only via
   yt-dlp `--flat-playlist`; private playlists requiring OAuth are still v2).
-  A pasted playlist URL becomes a whole new project with each video queued.
-  See `INTEGRATION.md` §7.3 and `bin/ts playlist <url>`.
+  Two flavors:
+    - "Playlist as project" — pasting a playlist URL into the sidebar
+      `+ Add from YouTube playlist` button creates a new project with
+      every video queued. See `INTEGRATION.md` §7.3 and `bin/ts
+      playlist <url>`.
+    - "Tracked playlist on an existing project" — added May 2026 (see
+      "Playlist sync" below). A project's YouTube panel gains a
+      Playlists subsection; each tracked playlist can be refreshed on
+      demand to pull any new items into the inbox.
 - Lyric forced-alignment polish (`whisperX` etc.)
 - Per-file auto-detect of speech vs music
 - Non-YouTube URLs (yt-dlp supports plenty of sites; we don't promise them)
@@ -273,11 +280,107 @@ POST   /api/projects/<pid>/youtube              { url, mode } -> { id, status }
 GET    /api/projects/<pid>/youtube              -> [ { id, url, status, ... } ]
 DELETE /api/projects/<pid>/youtube/<job_id>     -> remove from queue (if not in-flight)
 POST   /api/projects/<pid>/youtube/<job_id>/retry  -> requeue a failed row
+
+POST   /api/projects/<pid>/youtube/playlists                 { playlist_url, default_mode? } -> { ok, playlist }
+GET    /api/projects/<pid>/youtube/playlists                 -> { playlists: [...] }
+DELETE /api/projects/<pid>/youtube/playlists/<plid>          -> { ok }  (does NOT delete queued/transcribed videos)
+POST   /api/projects/<pid>/youtube/playlists/<plid>/refresh  -> { ok, added_count, total_seen, last_synced_at, playlist }
 ```
 
 The existing `/api/status` payload gains a `current_event.phase` value
 of `download` or `separate` when the worker is in those stages.
 Existing frontend polling logic is unchanged in shape.
+
+## Playlist sync (tracked playlists on existing projects)
+
+A tracked playlist lives on a project alongside the URL inbox. The
+user adds a public-playlist URL, optionally picks a default mode
+(speech/music), and hits **Refresh** when they want any new items
+from the playlist pulled into the inbox. Sync is on-demand only —
+there's no background polling in v1.
+
+### Data model
+
+Each project's `state.json` gains a `youtube_playlists` list (in
+addition to `youtube_urls`). Each row:
+
+```python
+{
+  "id": "uuid",
+  "url": "https://www.youtube.com/playlist?list=PL...",
+  "playlist_id": "PL...",          # filled from yt-dlp metadata
+  "title": "...",
+  "channel": "...",
+  "default_mode": "speech",        # "speech" | "music" — mode applied to new items
+  "item_count": 47,                # last-known count
+  "added_at": "...",
+  "last_synced_at": "...",         # null until first refresh
+  "last_status": "ok",             # "never" | "syncing" | "ok" | "failed"
+  "last_added_count": 3,
+  "last_total_seen": 47,
+  "last_error": null,
+  "seen_video_ids": ["abc...", ...]  # dedupe set; persists across refreshes
+}
+```
+
+### Sync semantics
+
+- On `POST .../playlists/<plid>/refresh`, the server runs
+  `yt_ingest.sync_playlist(state, row)`:
+  1. fetches the playlist via the existing `fetch_playlist_metadata`
+     (yt-dlp `--flat-playlist`, no API key, no OAuth);
+  2. iterates `items[]`, dedupes by `video_id` against
+     `seen_video_ids`, and enqueues new items into the project's URL
+     inbox via `state.add_url(item_url, default_mode)`;
+  3. patches `last_status`, `last_synced_at`, `last_added_count`,
+     `last_total_seen`, `seen_video_ids` on the row.
+- Items the user has already removed from the inbox are NOT
+  re-enqueued (the dedupe set is sticky). To force a re-add, the user
+  removes + re-adds the playlist.
+- Removing the playlist row does NOT touch already-enqueued or
+  transcribed videos — they belong to the project at that point.
+
+### Concurrency choice: synchronous in the request
+
+v1 runs the sync in the Flask request handler (blocks the HTTP
+response until done). The reasoning:
+
+- `yt-dlp --flat-playlist` is fast for the playlist sizes we expect
+  (sub-second for tens of items, well under 10s for the few-hundred
+  range). For an explicit user-initiated action, blocking the request
+  is fine.
+- Synchronous responses let the UI render concrete results ("Added 3
+  new videos") without inventing a job-polling layer.
+- The worker is already busy with download/separate/transcribe. Doing
+  a yt-dlp metadata fetch on its thread would block all transcription
+  for the duration of the fetch — worse than blocking one HTTP
+  request.
+
+If real-world playlists prove slow (e.g. multi-thousand-item channel
+uploads), the fallback is to wrap the sync in a worker job and return
+a "syncing" status immediately; the UI already renders that state on
+the row (it shows briefly while the request is in-flight). The code
+in `app/yt_ingest.py:sync_playlist` is structured so the call site is
+the only thing that needs to change.
+
+### UI
+
+In the project view's YouTube panel (only shown when
+`youtube_enabled`), a **Playlists** subsection sits above the URL
+inbox:
+
+- "＋ Add playlist" reveals a form (URL + mode + Add button). The
+  server validates the playlist server-side before saving the row.
+- The list shows title, channel, item count, last-sync timestamp,
+  and a status badge.
+- Each row has a Refresh button (always visible — primary action)
+  and a Remove button (with a confirm dialog noting that enqueued
+  videos stay).
+- On successful refresh, "Added N new videos" appears in the form
+  status line and the URL inbox below auto-refreshes.
+
+No new page or tab — the feature folds into the existing project
+view per the UI principles above.
 
 ## Dependencies & install
 
@@ -473,7 +576,10 @@ remains:
 
 Same as the original spec, lightly re-cast:
 
-1. Playlist ingest — one URL, N rows in `youtube_urls`.
+1. ~~Playlist ingest — one URL, N rows in `youtube_urls`.~~ Shipped
+   in two forms (May 2026): "playlist as project" creation, and
+   per-project tracked playlists with on-demand refresh. See
+   "Playlist sync" above.
 2. Karaoke video output (ffmpeg burns the `.srt` over the
    instrumental).
 3. Auto-detect speech vs music from the audio itself.
