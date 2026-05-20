@@ -25,6 +25,10 @@ have the UI open. Open the UI any time at **http://127.0.0.1:5180**.
   additionally splits vocals/instrumental via Demucs.
 - **YouTube playlist → project**: paste a public playlist URL and the
   studio creates a new project with every video queued for ingest.
+- **Tracked playlists on existing projects**: add one or more public
+  playlists to a project's YouTube panel and hit Refresh to pull any
+  new videos into the URL inbox (idempotent — already-enqueued videos
+  aren't re-added).
 - **External read access** via `bin/ts` CLI — skills and sibling apps can
   list projects, fetch transcripts, queue URLs without writing HTTP code.
   See `INTEGRATION.md` §7.
@@ -78,6 +82,12 @@ on every file. The studio's status panel surfaces this.
 - **Add a YouTube playlist as a project**: `+ Add from YouTube playlist`
   in the sidebar → paste the playlist URL → preview → confirm. Creates
   the project at `~/Documents/Transcribe Studio/Playlists/<title>/`.
+- **Track a playlist on an existing project**: open the project, enable
+  YouTube ingest if needed, then in the **Playlists** subsection of the
+  YouTube panel click `＋ Add playlist`, paste the URL, and hit Add.
+  Click **Refresh** on the playlist row whenever you want to pull new
+  videos into the inbox. Removing the row stops tracking but leaves
+  already-enqueued or transcribed videos in place.
 - **Pick a specific file to transcribe next**: hover the row in the project view, click `↑`
 - **Re-transcribe a bad transcript**: hover the row, click `redo`. The studio detects
   hallucination loops automatically and shows a warning banner with the suggested fix.

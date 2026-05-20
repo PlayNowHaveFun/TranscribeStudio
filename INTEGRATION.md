@@ -492,7 +492,26 @@ Added after §3 was written. A public playlist URL becomes a whole project, with
 
 Request: `{playlist_url, mode?}`. No OAuth required — yt-dlp's `--flat-playlist` works on any public/unlisted playlist URL containing `?list=PL...`. Private/personal playlists need OAuth and are out of scope for v1.
 
-### 7.4 Caller expectations
+### 7.4 Tracked playlists on existing projects — `[exists today]`
+
+A distinct shape from §7.3: instead of creating a whole project from a playlist, a caller can attach one or more public playlists to an *existing* project and pull new videos in on demand. The studio dedupes by `video_id` per playlist row, so re-running refresh is idempotent.
+
+| Route                                                                       | Purpose                                              |
+|-----------------------------------------------------------------------------|------------------------------------------------------|
+| `GET    /api/projects/<pid>/youtube/playlists`                              | List tracked playlists on the project                |
+| `POST   /api/projects/<pid>/youtube/playlists`                              | Add a tracked playlist (validates the URL first)    |
+| `DELETE /api/projects/<pid>/youtube/playlists/<plid>`                       | Stop tracking — already-enqueued videos stay         |
+| `POST   /api/projects/<pid>/youtube/playlists/<plid>/refresh`               | Sync: enqueue any new items into the project inbox  |
+
+All four routes return 400 `{"error": "youtube_disabled", ...}` when the project doesn't have YouTube ingest enabled, mirroring §3.
+
+POST body for add: `{playlist_url, default_mode?}` — `default_mode` defaults to the project's `youtube_default_mode`. The server fetches the playlist via yt-dlp before saving the row, so an invalid URL returns 400/502 immediately rather than landing as a perma-failing row.
+
+Refresh response: `{ok, added_count, total_seen, last_synced_at, playlist}`. Sync runs synchronously in the HTTP request — fine for the playlist sizes we expect (yt-dlp `--flat-playlist` is sub-second to a few seconds for hundreds of items). Failures come back as 502 with `{"error": "sync_failed", "message": "...", "playlist": {...}}` and the row's `last_status` is `"failed"`.
+
+The sticky dedupe set lives on the playlist row (`seen_video_ids`). A caller that wants to force a re-add of a video the user manually removed from the inbox must remove and re-add the playlist row — refresh alone will skip it.
+
+### 7.5 Caller expectations
 
 The studio is a localhost daemon, not a public service. Consumers should:
 
@@ -533,6 +552,12 @@ GET    /api/projects/<pid>/narrative?path=<abs>&style=<s>   cached narrative
 POST   /api/projects/from-playlist/preview {playlist_url}    peek (no commit)
 POST   /api/projects/from-playlist         {playlist_url, mode?}   create + bulk-enqueue
 
+  Tracked playlists on existing projects (§7.4):
+GET    /api/projects/<pid>/youtube/playlists                          list tracked playlists
+POST   /api/projects/<pid>/youtube/playlists           {playlist_url, default_mode?}   add
+DELETE /api/projects/<pid>/youtube/playlists/<plid>                   stop tracking
+POST   /api/projects/<pid>/youtube/playlists/<plid>/refresh           sync new items into inbox
+
   Convenience CLI (no HTTP wiring needed):
 bin/ts {status,list,files,transcript,narrative,submit,playlist} …
 ```
@@ -546,7 +571,10 @@ For implementers of either side of the contract:
 - `app/main.py:425–479` — existing POST handler + the "keep JSON-clean for MCP" decision comment
 - `app/main.py:429–431` — `_ALLOWED_MODES`, `_TERMINAL_URL_STATUSES`, `_IN_FLIGHT_URL_STATUSES` (the source-of-truth tuples)
 - `app/main.py:481–551` — DELETE, prioritize, retry handlers
+- `app/main.py:565–684` — tracked-playlist CRUD + refresh handlers (§7.4)
 - `app/yt_ingest.py:105–115` — output folder naming convention
+- `app/yt_ingest.py:548–620` — `sync_playlist()` (idempotent, dedupes by video_id)
+- `app/projects.py` — `add_playlist`/`list_playlists`/`update_playlist`/`remove_playlist` on `ProjectState`
 - `app/transcriber.py:264` — `_process_url_job` (where the new `transcript_path` field gets set on success)
 - `app/projects.py` — `ProjectState.add_url`, `list_urls`, `update_url`, `get_url` (methods the new ingest blueprint calls)
 - `SPEC_YOUTUBE_AND_MUSIC.md` — earlier internal spec for the YouTube + Music modes
