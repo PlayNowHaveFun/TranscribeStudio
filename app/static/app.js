@@ -1388,16 +1388,36 @@ function openPlaylistModal() {
   setTimeout(() => $("#pl-url").focus(), 50);
 }
 
+// fetch wrapper that surfaces the server's JSON {message, error} on non-2xx
+// instead of just the HTTP status. Kept local to the playlist modal — the
+// shared api() helper is intentionally minimal for the rest of the app.
+async function _fetchJson(path, body) {
+  const r = await fetch(path, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+  });
+  let data = null;
+  try { data = await r.json(); } catch (_) { /* non-JSON response */ }
+  if (!r.ok) {
+    const msg = (data && (data.message || data.error)) || `HTTP ${r.status}`;
+    throw new Error(msg);
+  }
+  return data;
+}
+
 async function previewPlaylist() {
   const url = $("#pl-url").value.trim();
   if (!url) { $("#pl-url-status").textContent = "Paste a playlist URL first."; return; }
+  if (!/[?&]list=/.test(url)) {
+    $("#pl-url-status").textContent = "That looks like a single-video URL. A playlist URL contains \"list=PL…\" — open the playlist page on YouTube and copy that URL.";
+    return;
+  }
   const btn = $("#pl-preview");
   btn.disabled = true;
   $("#pl-url-status").textContent = "Fetching playlist… (can take 5-15s for large playlists)";
   try {
-    const res = await api("/api/projects/from-playlist/preview", {
-      method: "POST", body: { playlist_url: url },
-    });
+    const res = await _fetchJson("/api/projects/from-playlist/preview", { playlist_url: url });
     const pl = res.playlist;
     const sampleHtml = pl.sample.length
       ? `<ul class="pl-sample">${pl.sample.map(s =>
@@ -1438,9 +1458,7 @@ async function createPlaylistProject() {
   btn.disabled = true;
   $("#pl-create-status").textContent = "Creating project and queuing videos…";
   try {
-    const res = await api("/api/projects/from-playlist", {
-      method: "POST", body: { playlist_url: url, mode },
-    });
+    const res = await _fetchJson("/api/projects/from-playlist", { playlist_url: url, mode });
     closeAllModals();
     switchView("project", res.project.id);
   } catch (e) {
