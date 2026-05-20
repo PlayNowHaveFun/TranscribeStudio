@@ -736,6 +736,11 @@ let youtubeListCache = [];
 let youtubeListLastFetchedFor = null;
 let youtubeListLastFetchedAt = 0;
 
+let youtubePlaylistsCache = [];
+let youtubePlaylistsLastFetchedFor = null;
+let youtubePlaylistsLastFetchedAt = 0;
+const youtubePlaylistSyncing = new Set();   // ids currently mid-refresh, for spinner state
+
 const YT_STATUS_TAG = {
   queued:       '<span class="tag">queued</span>',
   downloading:  '<span class="tag accent">downloading</span>',
@@ -782,9 +787,27 @@ function renderYoutubePanelInto(targetId, p, prevStatus) {
     return;
   }
 
-  // Enabled: render input + list. Skeleton once, patch list on update.
+  // Enabled: render playlists subsection + URL input + list.
+  // Skeleton once, patch on update.
   if (!body.querySelector(".yt-input-row")) {
     body.innerHTML = `
+      <div class="yt-playlists" style="margin-bottom:14px;">
+        <div class="flex-between" style="margin-bottom:6px;">
+          <div style="font-weight:600;">Playlists</div>
+          <button class="btn-secondary" id="yt-pl-toggle-form">＋ Add playlist</button>
+        </div>
+        <div id="yt-pl-add-form" hidden style="display:flex; gap:8px; align-items:center; margin-bottom:10px;">
+          <input type="url" id="yt-pl-url-input" placeholder="https://www.youtube.com/playlist?list=PL…"
+                 style="flex:1; padding:8px; border:1px solid var(--border); border-radius:6px;"/>
+          <select id="yt-pl-mode-select" style="padding:8px; border:1px solid var(--border); border-radius:6px;">
+            <option value="speech">Speech</option>
+            <option value="music">Music</option>
+          </select>
+          <button class="btn-primary" id="yt-pl-add-btn">Add</button>
+        </div>
+        <div class="muted small" id="yt-pl-form-status" style="margin-bottom:8px;"></div>
+        <div id="yt-pl-list"></div>
+      </div>
       <div class="yt-input-row" style="display:flex; gap:8px; align-items:center; margin-bottom:12px;">
         <input type="url" id="yt-url-input" placeholder="https://www.youtube.com/watch?v=..."
                style="flex:1; padding:8px; border:1px solid var(--border); border-radius:6px;"/>
@@ -801,6 +824,17 @@ function renderYoutubePanelInto(targetId, p, prevStatus) {
     $("#yt-url-input").addEventListener("keydown", (e) => {
       if (e.key === "Enter") submitYoutubeUrl(p.id);
     });
+
+    $("#yt-pl-mode-select").value = p.youtube_default_mode || "speech";
+    $("#yt-pl-toggle-form").onclick = () => {
+      const form = $("#yt-pl-add-form");
+      form.hidden = !form.hidden;
+      if (!form.hidden) $("#yt-pl-url-input").focus();
+    };
+    $("#yt-pl-add-btn").onclick = () => addPlaylist(p.id);
+    $("#yt-pl-url-input").addEventListener("keydown", (e) => {
+      if (e.key === "Enter") addPlaylist(p.id);
+    });
   }
 
   // Fetch on view-enter, or when youtube_total changes vs. prev poll,
@@ -814,6 +848,16 @@ function renderYoutubePanelInto(targetId, p, prevStatus) {
     fetchAndRenderYoutubeList(p.id);
   } else {
     renderYoutubeListFromCache();
+  }
+
+  // Playlists list: fetch on view-enter, or stale (>30s). Hits a
+  // separate endpoint, so it has its own cache + freshness clock.
+  const plStale = (now - youtubePlaylistsLastFetchedAt) > 30;
+  const plProjectSwitched = youtubePlaylistsLastFetchedFor !== p.id;
+  if (plProjectSwitched || plStale) {
+    fetchAndRenderPlaylists(p.id);
+  } else {
+    renderPlaylistsFromCache(p.id);
   }
 }
 
@@ -946,6 +990,174 @@ async function submitYoutubeUrl(pid) {
     alert("Submit failed: " + e.message);
   } finally {
     btn.disabled = false;
+  }
+}
+
+// ---------- youtube playlists ----------
+
+const YT_PL_STATUS_TAG = {
+  never:   '<span class="tag">never synced</span>',
+  syncing: '<span class="tag accent">syncing</span>',
+  ok:      '<span class="tag success">synced</span>',
+  failed:  '<span class="tag danger">failed</span>',
+};
+
+async function fetchAndRenderPlaylists(pid) {
+  try {
+    const data = await api(`/api/projects/${pid}/youtube/playlists`);
+    youtubePlaylistsCache = data.playlists || [];
+    youtubePlaylistsLastFetchedFor = pid;
+    youtubePlaylistsLastFetchedAt = Date.now() / 1000;
+    renderPlaylistsFromCache(pid);
+  } catch (e) { /* keep old list */ }
+}
+
+function renderPlaylistsFromCache(pid) {
+  const list = $("#yt-pl-list");
+  if (!list) return;
+  if (youtubePlaylistsCache.length === 0) {
+    list.innerHTML = `<div class="muted small">No tracked playlists. Add one to auto-pull new videos into the inbox.</div>`;
+    return;
+  }
+  // Newest-added first; minor UX touch, mirrors how newly-added items
+  // show up in other lists in this app.
+  const sorted = [...youtubePlaylistsCache].sort((a, b) =>
+    (b.added_at || "").localeCompare(a.added_at || "")
+  );
+  list.innerHTML = `<table class="file-table yt-pl-table">
+    <thead><tr>
+      <th>Playlist</th><th>Channel</th><th class="num">Items</th>
+      <th>Last sync</th><th></th>
+    </tr></thead>
+    <tbody>${sorted.map(playlistRow).join("")}</tbody>
+  </table>`;
+  bindPlaylistRowHandlers(pid);
+}
+
+function playlistRow(r) {
+  const title = r.title || r.url;
+  const channel = r.channel || "—";
+  const syncing = youtubePlaylistSyncing.has(r.id);
+  const liveStatus = syncing ? "syncing" : (r.last_status || "never");
+  const statusTag = YT_PL_STATUS_TAG[liveStatus] || `<span class="tag">${escapeHtml(liveStatus)}</span>`;
+  const lastSync = r.last_synced_at
+    ? new Date(r.last_synced_at).toLocaleString()
+    : "—";
+  const addedNote = (r.last_status === "ok" && r.last_added_count > 0)
+    ? `<div class="muted small">+${r.last_added_count} new last sync</div>`
+    : "";
+  const errNote = (r.last_status === "failed" && r.last_error)
+    ? `<div class="muted small" style="color:var(--danger); margin-top:2px;">${escapeHtml(r.last_error)}</div>`
+    : "";
+  const refreshDisabled = syncing ? "disabled" : "";
+  const refreshLabel = syncing ? "Refreshing…" : "Refresh";
+  return `<tr data-pl-id="${escapeAttr(r.id)}">
+    <td>
+      <div class="filename" title="${escapeAttr(r.url)}">${escapeHtml(title)}</div>
+      <div class="muted small"><span class="tag">${escapeHtml(r.default_mode || "speech")}</span> · ${statusTag} · ${escapeHtml(lastSync)}</div>
+      ${addedNote}${errNote}
+    </td>
+    <td class="muted small">${escapeHtml(channel)}</td>
+    <td class="num">${r.item_count ?? 0}</td>
+    <td class="muted small">${escapeHtml(lastSync)}</td>
+    <td><div class="actions">
+      <button class="btn-icon yt-pl-action-refresh" title="Pull any new videos from this playlist into the inbox" ${refreshDisabled}>${refreshLabel}</button>
+      <button class="btn-icon yt-pl-action-remove" title="Stop tracking — already-enqueued videos stay">×</button>
+    </div></td>
+  </tr>`;
+}
+
+function bindPlaylistRowHandlers(pid) {
+  $$("#yt-pl-list tr[data-pl-id]").forEach(tr => {
+    const id = tr.dataset.plId;
+    $(".yt-pl-action-refresh", tr)?.addEventListener("click", (e) => {
+      e.stopPropagation();
+      refreshPlaylist(pid, id);
+    });
+    $(".yt-pl-action-remove", tr)?.addEventListener("click", (e) => {
+      e.stopPropagation();
+      if (!confirm(
+        "Stop tracking this playlist?\n\n" +
+        "Already-enqueued or transcribed videos stay in the project — " +
+        "this just stops auto-pulling new videos."
+      )) return;
+      removePlaylist(pid, id);
+    });
+  });
+}
+
+async function addPlaylist(pid) {
+  const url = $("#yt-pl-url-input").value.trim();
+  const mode = $("#yt-pl-mode-select").value;
+  const status = $("#yt-pl-form-status");
+  const btn = $("#yt-pl-add-btn");
+  status.textContent = "";
+  if (!url) {
+    status.textContent = "Paste a playlist URL first.";
+    return;
+  }
+  btn.disabled = true;
+  status.textContent = "Validating playlist…";
+  try {
+    const res = await fetch(`/api/projects/${pid}/youtube/playlists`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ playlist_url: url, default_mode: mode }),
+    });
+    const data = await res.json();
+    if (!res.ok || !data.ok) {
+      status.textContent = data.message || data.error || `Add failed (${res.status})`;
+      return;
+    }
+    $("#yt-pl-url-input").value = "";
+    $("#yt-pl-add-form").hidden = true;
+    status.textContent = `Added "${data.playlist.title || data.playlist.url}". Hit Refresh to pull videos.`;
+    fetchAndRenderPlaylists(pid);
+  } catch (e) {
+    status.textContent = "Add failed: " + e.message;
+  } finally {
+    btn.disabled = false;
+  }
+}
+
+async function refreshPlaylist(pid, plid) {
+  youtubePlaylistSyncing.add(plid);
+  renderPlaylistsFromCache(pid);
+  try {
+    const res = await fetch(`/api/projects/${pid}/youtube/playlists/${plid}/refresh`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+    });
+    const data = await res.json();
+    if (!res.ok || !data.ok) {
+      // Sync failed: refetch so the row reflects last_status=failed + last_error.
+      await fetchAndRenderPlaylists(pid);
+      alert(data.message || data.error || `Refresh failed (${res.status})`);
+      return;
+    }
+    const formStatus = $("#yt-pl-form-status");
+    if (formStatus) {
+      formStatus.textContent = data.added_count > 0
+        ? `Added ${data.added_count} new video${data.added_count === 1 ? "" : "s"} from playlist.`
+        : `No new videos (${data.total_seen} seen total).`;
+    }
+    await fetchAndRenderPlaylists(pid);
+    fetchAndRenderYoutubeList(pid);  // refresh the inbox below
+    pollStatus();
+  } catch (e) {
+    alert("Refresh failed: " + e.message);
+  } finally {
+    youtubePlaylistSyncing.delete(plid);
+    renderPlaylistsFromCache(pid);
+  }
+}
+
+async function removePlaylist(pid, plid) {
+  try {
+    await api(`/api/projects/${pid}/youtube/playlists/${plid}`, { method: "DELETE" });
+    fetchAndRenderPlaylists(pid);
+  } catch (e) {
+    alert("Remove failed: " + e.message);
   }
 }
 

@@ -672,6 +672,13 @@ details summary:hover { color: var(--text); }
 .yt-table .filename { font-weight: 500; color: var(--text); }
 .yt-table tr.yt-failed td { background: var(--danger-soft); }
 .yt-table tr.yt-done td { opacity: 0.7; }
+
+/* Playlists subsection — primary actions stay visible (no hover gating). */
+.yt-pl-table { width: 100%; }
+.yt-pl-table .filename { font-weight: 500; color: var(--text); }
+.yt-pl-table .actions { visibility: visible; }
+.yt-pl-table .num { text-align: right; }
+.yt-pl-table th.num { text-align: right; }
 .yt-disabled-msg { padding: 8px 0; line-height: 1.5; color: var(--text-muted); }
 .yt-disabled-msg code {
   background: var(--surface-3);
