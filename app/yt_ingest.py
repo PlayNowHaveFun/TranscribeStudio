@@ -584,11 +584,30 @@ def sync_playlist(state, playlist_row: dict) -> dict:
             last_synced_at=_dt.now().isoformat(),
         ) or playlist_row
 
+    # Cross-reference the project's existing URL inbox so items added by
+    # other flows (the "playlist as project" creation, manual single-URL
+    # adds, a prior sync whose row was deleted) don't get re-enqueued on
+    # this playlist's first sync. We still record them on the row's
+    # seen_video_ids so subsequent refreshes treat the dedupe set as
+    # canonical for this playlist.
+    existing_keys: set[str] = set()
+    for u in state.list_urls():
+        v = u.get("video_id")
+        if v:
+            existing_keys.add(v)
+        url_str = u.get("url") or ""
+        if url_str:
+            existing_keys.add(url_str)
+            ext = _video_id_from_url(url_str)
+            if ext:
+                existing_keys.add(ext)
+
     # Dedupe set lives on the row. Use list+set to preserve insertion order.
     seen = list(playlist_row.get("seen_video_ids") or [])
     seen_set = set(seen)
 
     added = 0
+    skipped_existing = 0
     for item in meta["items"]:
         vid = item.get("video_id")
         item_url = item.get("url") or ""
@@ -598,6 +617,20 @@ def sync_playlist(state, playlist_row: dict) -> dict:
         dedupe_key = vid or item_url
         if dedupe_key in seen_set:
             continue
+
+        # Already in the project's inbox via some other flow? Record on
+        # the row but don't re-enqueue — would create a duplicate row
+        # that re-downloads + re-transcribes the same video.
+        in_inbox = (
+            (vid and vid in existing_keys)
+            or item_url in existing_keys
+        )
+        if in_inbox:
+            seen.append(dedupe_key)
+            seen_set.add(dedupe_key)
+            skipped_existing += 1
+            continue
+
         state.add_url(item_url, mode)
         seen.append(dedupe_key)
         seen_set.add(dedupe_key)
@@ -616,6 +649,18 @@ def sync_playlist(state, playlist_row: dict) -> dict:
         last_synced_at=_dt.now().isoformat(),
         seen_video_ids=seen,
     ) or playlist_row
+
+
+_YT_ID_RE = re.compile(r"(?:v=|youtu\.be/|/embed/|/shorts/)([0-9A-Za-z_-]{11})")
+
+
+def _video_id_from_url(url: str) -> Optional[str]:
+    """Best-effort extraction of an 11-char YouTube video id from a URL.
+    Handles watch?v=, youtu.be/, /embed/, /shorts/ shapes. Used by
+    sync_playlist to cross-reference URL-only inbox rows (where the
+    worker hasn't yet filled in video_id) against playlist items."""
+    m = _YT_ID_RE.search(url or "")
+    return m.group(1) if m else None
 
 
 # --------------------------------------------------------------------------
