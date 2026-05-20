@@ -26,7 +26,10 @@ Two operator-visible capabilities:
 **Out of scope for v1** (called out so they don't bleed into the build):
 
 - Karaoke video rendering (instrumental + burned-in subtitles → `.mp4`)
-- Playlist support (one URL at a time; playlists are v2)
+- ~~Playlist support~~ — **shipped** (May 2026, public/unlisted only via
+  yt-dlp `--flat-playlist`; private playlists requiring OAuth are still v2).
+  A pasted playlist URL becomes a whole new project with each video queued.
+  See `INTEGRATION.md` §7.3 and `bin/ts playlist <url>`.
 - Lyric forced-alignment polish (`whisperX` etc.)
 - Per-file auto-detect of speech vs music
 - Non-YouTube URLs (yt-dlp supports plenty of sites; we don't promise them)
@@ -50,12 +53,16 @@ flips:
   terminal invocation for the music/karaoke use case, where the user is
   usually not at a shell.
 
-No standalone CLI. The ingest logic is a Python module (`app/yt_ingest.py`,
+No standalone CLI **for the ingest pipeline itself**. The ingest logic is a Python module (`app/yt_ingest.py`,
 sibling to `engine.py` / `scanner.py`) imported by the worker. Decision
 locked: the studio is the only entry point — shell-script invocation
 isn't a v1 use case, and skipping it keeps the module free of argparse
 clutter, import-side-effect hygiene, and Flask-vs-CLI dependency split
 concerns.
+
+(A `bin/ts` CLI does exist as of May 2026, but it's a **client** of the
+HTTP API — it doesn't re-implement ingest, it just shells `POST /api/projects/<pid>/youtube`
+and the playlist endpoints. The studio must be running. See `INTEGRATION.md` §7.)
 
 ## How it grafts onto the existing model
 

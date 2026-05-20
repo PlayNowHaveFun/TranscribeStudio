@@ -20,6 +20,14 @@ have the UI open. Open the UI any time at **http://127.0.0.1:5180**.
 - Prioritize specific files, skip files, re-transcribe with different settings
 - Built-in **hallucination detection** on every completed transcript
 - View transcripts in the browser without leaving the app
+- **YouTube ingest** (per-project): paste a video URL, studio downloads
+  audio via yt-dlp and queues it for transcription. Music mode
+  additionally splits vocals/instrumental via Demucs.
+- **YouTube playlist → project**: paste a public playlist URL and the
+  studio creates a new project with every video queued for ingest.
+- **External read access** via `bin/ts` CLI — skills and sibling apps can
+  list projects, fetch transcripts, queue URLs without writing HTTP code.
+  See `INTEGRATION.md` §7.
 
 ## What it does NOT do
 
@@ -67,6 +75,9 @@ on every file. The studio's status panel surfaces this.
   (or just hit `http://127.0.0.1:5180` in any browser)
 - **Pause / resume**: button in the upper-right
 - **Add a project**: `+ New project` in the sidebar
+- **Add a YouTube playlist as a project**: `+ Add from YouTube playlist`
+  in the sidebar → paste the playlist URL → preview → confirm. Creates
+  the project at `~/Documents/Transcribe Studio/Playlists/<title>/`.
 - **Pick a specific file to transcribe next**: hover the row in the project view, click `↑`
 - **Re-transcribe a bad transcript**: hover the row, click `redo`. The studio detects
   hallucination loops automatically and shows a warning banner with the suggested fix.
@@ -77,6 +88,8 @@ on every file. The studio's status panel surfaces this.
 
 - `app/` — Python source
 - `bin/transcribe-engine.sh` — original bash engine kept as reference (the Python `engine.py` is the live one)
+- `bin/ts` — Python CLI for external consumers (skills, scripts, sibling apps); thin wrapper over the HTTP API
+- `INTEGRATION.md` — contract for external callers (read + write, including playlist endpoints)
 - `data/projects.json` — project registry
 - `data/projects/<id>/state.json` — per-project queue/history
 - `logs/studio.log` — main rolling log
