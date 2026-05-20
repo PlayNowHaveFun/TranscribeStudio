@@ -151,6 +151,7 @@ class ProjectState:
             "skipped": {},        # paths the user marked as skip (not pending)
             "current": None,      # currently in progress, if any
             "youtube_urls": [],   # list of url-job dicts (see add_url)
+            "youtube_playlists": [],  # list of tracked playlists (see add_playlist)
         }
         for k, v in defaults.items():
             loaded.setdefault(k, v)
@@ -322,6 +323,90 @@ class ProjectState:
             if len(new) == len(urls):
                 return False
             self._data["youtube_urls"] = new
+        self._save()
+        return True
+
+    # ------------------------------------------------------------------
+    # YouTube playlist tracking — public playlists (yt-dlp, no OAuth)
+    #
+    # A playlist row is the user-visible knob: "track this playlist; pull
+    # any new videos into my URL inbox on refresh." It does NOT own the
+    # videos it enqueues — once a video is in `youtube_urls` it belongs
+    # to the project, so removing the playlist row never deletes already-
+    # enqueued/transcribed videos. `seen_video_ids` is the de-dupe set so
+    # repeated refreshes don't re-enqueue the same items.
+    # Schema:
+    #   {
+    #     id, url,                       # the pasted playlist URL
+    #     playlist_id?,                  # yt-dlp playlist id (PL...), if known
+    #     title, channel,
+    #     default_mode,                  # "speech" | "music" for new items
+    #     item_count,                    # last-known count from yt-dlp
+    #     added_at, last_synced_at?,
+    #     last_status,                   # "never" | "syncing" | "ok" | "failed"
+    #     last_added_count, last_total_seen,
+    #     last_error?,
+    #     seen_video_ids: [..],          # video ids we've already enqueued
+    #   }
+    # ------------------------------------------------------------------
+
+    def list_playlists(self) -> list[dict]:
+        with self._lock:
+            return list(self._data.get("youtube_playlists", []))
+
+    def get_playlist(self, playlist_row_id: str) -> Optional[dict]:
+        with self._lock:
+            for row in self._data.get("youtube_playlists", []):
+                if row.get("id") == playlist_row_id:
+                    return dict(row)
+        return None
+
+    def add_playlist(self, *, url: str, default_mode: str,
+                     title: str = "", channel: str = "",
+                     playlist_id: Optional[str] = None,
+                     item_count: int = 0) -> dict:
+        row = {
+            "id": uuid.uuid4().hex[:12],
+            "url": url,
+            "playlist_id": playlist_id,
+            "title": title,
+            "channel": channel,
+            "default_mode": default_mode,
+            "item_count": item_count,
+            "added_at": datetime.now().isoformat(),
+            "last_synced_at": None,
+            "last_status": "never",
+            "last_added_count": 0,
+            "last_total_seen": 0,
+            "last_error": None,
+            "seen_video_ids": [],
+        }
+        with self._lock:
+            self._data.setdefault("youtube_playlists", []).append(row)
+        self._save()
+        return dict(row)
+
+    def update_playlist(self, playlist_row_id: str, **changes) -> Optional[dict]:
+        with self._lock:
+            for row in self._data.get("youtube_playlists", []):
+                if row.get("id") == playlist_row_id:
+                    row.update(changes)
+                    updated = dict(row)
+                    break
+            else:
+                return None
+        self._save()
+        return updated
+
+    def remove_playlist(self, playlist_row_id: str) -> bool:
+        """Drop a playlist row. Does NOT touch already-enqueued URLs —
+        they belong to the project, not the playlist."""
+        with self._lock:
+            rows = self._data.get("youtube_playlists", [])
+            new = [r for r in rows if r.get("id") != playlist_row_id]
+            if len(new) == len(rows):
+                return False
+            self._data["youtube_playlists"] = new
         self._save()
         return True
 

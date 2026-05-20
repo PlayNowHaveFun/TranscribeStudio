@@ -550,6 +550,141 @@ def create_app() -> tuple[Flask, Registry, Worker]:
         worker.wake()
         return jsonify({"ok": True, "url_row": updated})
 
+    # ----- YouTube playlist tracking (per-project, public only) -----
+    # A tracked playlist lives inside an existing project. Hitting refresh
+    # pulls any new items from the playlist (yt-dlp --flat-playlist) and
+    # enqueues them into this project's URL inbox. Removing a playlist
+    # row does NOT delete already-enqueued/transcribed videos — they
+    # belong to the project once enqueued.
+    #
+    # Sync runs synchronously in the request (v1 choice — see
+    # SPEC_YOUTUBE_AND_MUSIC.md, "Playlist sync"). yt-dlp --flat-playlist
+    # is fast enough for the playlist sizes we expect; move to a worker
+    # job if real-world latency proves otherwise.
+    @app.route("/api/projects/<pid>/youtube/playlists", methods=["GET"])
+    def api_youtube_playlists_list(pid):
+        p = registry.get(pid)
+        if not p:
+            abort(404)
+        if not p.youtube_enabled:
+            return jsonify({
+                "ok": False, "error": "youtube_disabled",
+                "message": "Enable YouTube ingest in this project's settings first.",
+            }), 400
+        state = registry.state(pid)
+        return jsonify({"playlists": state.list_playlists()})
+
+    @app.route("/api/projects/<pid>/youtube/playlists", methods=["POST"])
+    def api_youtube_playlists_add(pid):
+        from .yt_ingest import (
+            fetch_playlist_metadata,
+            MissingYtDlpError, YtDlpFailedError,
+            InvalidMetadataError, NotAPlaylistError,
+        )
+        p = registry.get(pid)
+        if not p:
+            abort(404)
+        if not p.youtube_enabled:
+            return jsonify({
+                "ok": False, "error": "youtube_disabled",
+                "message": "Enable YouTube ingest in this project's settings first.",
+            }), 400
+        if not p.folders:
+            return jsonify({
+                "ok": False, "error": "no_folders",
+                "message": "Project has no folders configured; YouTube downloads need somewhere to land.",
+            }), 400
+
+        body = request.get_json(force=True) or {}
+        playlist_url = (body.get("playlist_url") or "").strip()
+        mode = (body.get("default_mode") or p.youtube_default_mode).strip().lower()
+
+        if not playlist_url:
+            return jsonify({"ok": False, "error": "missing_url"}), 400
+        if not (playlist_url.startswith("http://") or playlist_url.startswith("https://")):
+            return jsonify({
+                "ok": False, "error": "invalid_url",
+                "message": "URL must start with http:// or https://",
+            }), 400
+        if mode not in _ALLOWED_MODES:
+            return jsonify({
+                "ok": False, "error": "invalid_mode",
+                "message": f"mode must be one of {_ALLOWED_MODES}",
+            }), 400
+
+        state = registry.state(pid)
+
+        # Verify the URL actually resolves to a playlist before saving the
+        # row — otherwise the user gets a stale row that perma-fails on refresh.
+        try:
+            meta = fetch_playlist_metadata(playlist_url)
+        except MissingYtDlpError as e:
+            return jsonify({"ok": False, "error": "missing_yt_dlp", "message": str(e)}), 500
+        except NotAPlaylistError as e:
+            return jsonify({"ok": False, "error": "not_a_playlist", "message": str(e)}), 400
+        except (YtDlpFailedError, InvalidMetadataError) as e:
+            return jsonify({"ok": False, "error": "fetch_failed", "message": str(e)}), 502
+
+        row = state.add_playlist(
+            url=playlist_url,
+            default_mode=mode,
+            title=meta.get("title") or "",
+            channel=meta.get("uploader") or "",
+            playlist_id=meta.get("playlist_id"),
+            item_count=meta.get("item_count", 0),
+        )
+        return jsonify({"ok": True, "playlist": row}), 201
+
+    @app.route("/api/projects/<pid>/youtube/playlists/<plid>", methods=["DELETE"])
+    def api_youtube_playlists_remove(pid, plid):
+        p = registry.get(pid)
+        if not p:
+            abort(404)
+        if not p.youtube_enabled:
+            return jsonify({
+                "ok": False, "error": "youtube_disabled",
+                "message": "Enable YouTube ingest in this project's settings first.",
+            }), 400
+        state = registry.state(pid)
+        if not state.get_playlist(plid):
+            abort(404)
+        state.remove_playlist(plid)
+        return jsonify({"ok": True})
+
+    @app.route("/api/projects/<pid>/youtube/playlists/<plid>/refresh", methods=["POST"])
+    def api_youtube_playlists_refresh(pid, plid):
+        from .yt_ingest import sync_playlist
+        p = registry.get(pid)
+        if not p:
+            abort(404)
+        if not p.youtube_enabled:
+            return jsonify({
+                "ok": False, "error": "youtube_disabled",
+                "message": "Enable YouTube ingest in this project's settings first.",
+            }), 400
+        state = registry.state(pid)
+        row = state.get_playlist(plid)
+        if not row:
+            abort(404)
+
+        updated = sync_playlist(state, row)
+        if updated.get("last_status") == "failed":
+            return jsonify({
+                "ok": False,
+                "error": "sync_failed",
+                "message": updated.get("last_error") or "playlist sync failed",
+                "playlist": updated,
+            }), 502
+
+        worker.wake()
+        return jsonify({
+            "ok": True,
+            "playlist": updated,
+            "added_count": updated.get("last_added_count", 0),
+            "total_seen": updated.get("last_total_seen", 0),
+            "last_synced_at": updated.get("last_synced_at"),
+        })
+
     # ----- YouTube playlist → project creation -----
     #
     # Two routes:

@@ -526,6 +526,99 @@ def fetch_playlist_metadata(playlist_url: str, timeout_sec: int = 120) -> dict:
 
 
 # --------------------------------------------------------------------------
+# Playlist sync — pull new items from a tracked public playlist into the
+# project's URL inbox.
+#
+# v1 design: synchronous. We call this from the Flask request handler
+# (POST .../playlists/<id>/refresh) and let it block until done. A
+# playlist with a few hundred items typically returns from yt-dlp
+# `--flat-playlist` in well under 10s — fine for an interactive request.
+# If real-world playlists turn out slow, the next move is to enqueue a
+# job through the worker (see SPEC_YOUTUBE_AND_MUSIC.md, Playlist sync
+# section). The code below is structured so swapping the call site is
+# the only change needed.
+#
+# Idempotency: dedupe is by `video_id`. `seen_video_ids` on the playlist
+# row tracks every item we've ever enqueued, so re-running refresh after
+# the user has manually removed an enqueued URL from the inbox will NOT
+# re-add it (intentional — user removed it for a reason). To force a
+# re-add, the user should remove + re-add the playlist itself.
+# --------------------------------------------------------------------------
+
+def sync_playlist(state, playlist_row: dict) -> dict:
+    """Refresh one tracked playlist row. Enqueues any new items into
+    `state.youtube_urls` and patches the row's last_* fields.
+
+    Args:
+        state: ProjectState — the project that owns this playlist row.
+        playlist_row: the playlist dict as stored in state (must have id, url, default_mode).
+
+    Returns:
+        The updated playlist row (a copy). Includes:
+          - last_status:        "ok" | "failed"
+          - last_added_count:   how many new items this sync enqueued
+          - last_total_seen:    total items yt-dlp saw in the playlist this run
+          - last_synced_at:     ISO timestamp
+          - last_error:         message string if status is "failed"
+
+    Failure modes are caught and recorded on the row; this function does
+    not raise. The caller can inspect `last_status` to decide on UX.
+    """
+    from datetime import datetime as _dt
+
+    plid = playlist_row["id"]
+    url = playlist_row["url"]
+    mode = playlist_row.get("default_mode") or "speech"
+
+    # Mark in-flight first so concurrent polls of the row show "syncing".
+    state.update_playlist(plid, last_status="syncing", last_error=None)
+
+    try:
+        meta = fetch_playlist_metadata(url)
+    except (MissingYtDlpError, YtDlpFailedError,
+            InvalidMetadataError, NotAPlaylistError) as e:
+        return state.update_playlist(
+            plid,
+            last_status="failed",
+            last_error=str(e),
+            last_synced_at=_dt.now().isoformat(),
+        ) or playlist_row
+
+    # Dedupe set lives on the row. Use list+set to preserve insertion order.
+    seen = list(playlist_row.get("seen_video_ids") or [])
+    seen_set = set(seen)
+
+    added = 0
+    for item in meta["items"]:
+        vid = item.get("video_id")
+        item_url = item.get("url") or ""
+        if not item_url:
+            continue
+        # Prefer dedupe by video_id; fall back to URL if id missing.
+        dedupe_key = vid or item_url
+        if dedupe_key in seen_set:
+            continue
+        state.add_url(item_url, mode)
+        seen.append(dedupe_key)
+        seen_set.add(dedupe_key)
+        added += 1
+
+    return state.update_playlist(
+        plid,
+        title=meta.get("title") or playlist_row.get("title") or "",
+        channel=meta.get("uploader") or playlist_row.get("channel") or "",
+        playlist_id=meta.get("playlist_id") or playlist_row.get("playlist_id"),
+        item_count=meta.get("item_count", 0),
+        last_status="ok",
+        last_error=None,
+        last_added_count=added,
+        last_total_seen=meta.get("item_count", 0),
+        last_synced_at=_dt.now().isoformat(),
+        seen_video_ids=seen,
+    ) or playlist_row
+
+
+# --------------------------------------------------------------------------
 # Progress parsers — best-effort, return None if the line doesn't match
 # --------------------------------------------------------------------------
 
