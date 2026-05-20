@@ -1,0 +1,212 @@
+#!/usr/bin/env python3
+"""
+ts — Transcribe Studio CLI for external consumers.
+
+Thin wrapper around the studio's HTTP API at http://127.0.0.1:5180/.
+The studio must be running (launchd / Open Studio.command / run.sh).
+
+Designed so any external tool — a Claude Code skill, Information Studio,
+an ad-hoc script — can shell out one line instead of doing HTTP wiring.
+
+No dependencies beyond stdlib. Override the base URL with TS_BASE_URL
+if you're running the studio on a non-default host/port.
+
+Subcommands:
+
+    ts status                              # is the studio reachable?
+    ts list                                # list all projects (TSV)
+    ts files <pid>                         # list files in a project (TSV)
+    ts transcript <pid> <path>             # print transcript .txt to stdout
+    ts narrative <pid> <path> [--style S]  # print cached narrative for a style
+    ts submit <pid> <url> [--mode M]       # enqueue a single YouTube URL
+    ts playlist <url> [--mode M]           # create project from public playlist
+
+`--mode` is `speech` (default) or `music`. `--style` is one of the
+narrative styles wired into the Narrative tab (default: story).
+
+Output: TSV for list-like subcommands so it pipes cleanly through cut /
+awk / fzf. JSON-printing subcommands use `--json` to get the raw blob.
+Errors go to stderr; exit code 1 on failure, 0 on success.
+"""
+from __future__ import annotations
+
+import argparse
+import json
+import os
+import sys
+import urllib.error
+import urllib.parse
+import urllib.request
+
+
+BASE = os.environ.get("TS_BASE_URL", "http://127.0.0.1:5180").rstrip("/")
+
+
+# -- HTTP helpers ----------------------------------------------------------
+
+def _request(method: str, path: str, *, params: dict | None = None,
+             body: dict | None = None, timeout: int = 180) -> dict:
+    """Issue an HTTP request and return the parsed JSON body.
+
+    Raises SystemExit on any failure with a message on stderr.
+    """
+    qs = ("?" + urllib.parse.urlencode(params)) if params else ""
+    data = json.dumps(body).encode() if body is not None else None
+    req = urllib.request.Request(
+        BASE + path + qs, method=method, data=data,
+        headers={"Content-Type": "application/json"} if data else {},
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as r:
+            return json.loads(r.read().decode() or "null")
+    except urllib.error.HTTPError as e:
+        try:
+            payload = json.loads(e.read().decode())
+            msg = payload.get("message") or payload.get("error") or str(e)
+        except Exception:
+            msg = f"{e.code} {e.reason}"
+        sys.exit(f"ts: {method} {path} → {msg}")
+    except urllib.error.URLError as e:
+        sys.exit(
+            f"ts: can't reach studio at {BASE} ({e.reason}). "
+            f"Is it running? Try `open '/Applications/Transcribe Studio.app'`."
+        )
+
+
+def _print_tsv(rows: list[list[str]]) -> None:
+    for row in rows:
+        print("\t".join(str(c) if c is not None else "" for c in row))
+
+
+# -- Subcommands -----------------------------------------------------------
+
+def cmd_status(_args) -> None:
+    data = _request("GET", "/api/status")
+    w = data.get("worker", {})
+    proj_count = len(data.get("projects", []))
+    paused = w.get("paused", False)
+    cur_proj = w.get("current_project")
+    cur_file = (w.get("current_event") or {}).get("file")
+    worker_line = "paused" if paused else (f"running {cur_proj}/{cur_file}" if cur_proj else "idle")
+    print(f"studio at {BASE}: ok")
+    print(f"  worker:   {worker_line}")
+    print(f"  projects: {proj_count}")
+    print(f"  ac_power: {w.get('ac_power')}")
+
+
+def cmd_list(args) -> None:
+    data = _request("GET", "/api/projects")
+    if args.json:
+        print(json.dumps(data, indent=2))
+        return
+    rows = [["id", "name", "folders", "youtube"]]
+    for p in data:
+        rows.append([
+            p["id"],
+            p["name"],
+            ",".join(p.get("folders", [])),
+            "yes" if p.get("youtube_enabled") else "no",
+        ])
+    _print_tsv(rows)
+
+
+def cmd_files(args) -> None:
+    data = _request("GET", f"/api/projects/{args.pid}/files")
+    if args.json:
+        print(json.dumps(data, indent=2))
+        return
+    rows = [["status", "path"]]
+    for f in data:
+        rows.append([f.get("status", "?"), f.get("path", "")])
+    _print_tsv(rows)
+
+
+def cmd_transcript(args) -> None:
+    data = _request("GET", f"/api/projects/{args.pid}/transcript",
+                    params={"path": args.path})
+    if args.json:
+        print(json.dumps(data, indent=2))
+        return
+    txt = data.get("txt")
+    if txt is None:
+        sys.exit(f"ts: no transcript yet for {args.path}")
+    sys.stdout.write(txt)
+
+
+def cmd_narrative(args) -> None:
+    data = _request("GET", f"/api/projects/{args.pid}/narrative",
+                    params={"path": args.path, "style": args.style})
+    if args.json:
+        print(json.dumps(data, indent=2))
+        return
+    # narrative payload shape: {style, scaffold, narrative, generated_at, ...}
+    body = data.get("narrative") or data.get("text") or ""
+    if not body:
+        sys.exit(f"ts: no narrative cached for style={args.style}")
+    sys.stdout.write(body)
+
+
+def cmd_submit(args) -> None:
+    data = _request("POST", f"/api/projects/{args.pid}/youtube",
+                    body={"url": args.url, "mode": args.mode})
+    if not data.get("ok"):
+        sys.exit(f"ts: submit failed: {data.get('message') or data.get('error')}")
+    row = data.get("url_row", {})
+    print(f"queued: {row.get('id')} ({args.url}) → project {args.pid}")
+
+
+def cmd_playlist(args) -> None:
+    data = _request("POST", "/api/projects/from-playlist",
+                    body={"playlist_url": args.url, "mode": args.mode},
+                    timeout=300)
+    if not data.get("ok"):
+        sys.exit(f"ts: playlist failed: {data.get('message') or data.get('error')}")
+    proj = data.get("project", {})
+    print(f"created project: {proj.get('id')} ({proj.get('name')})")
+    print(f"  queued: {data.get('queued_count')}  skipped: {data.get('skipped_count')}")
+
+
+# -- argparse wiring -------------------------------------------------------
+
+def main(argv: list[str] | None = None) -> None:
+    p = argparse.ArgumentParser(prog="ts", description=__doc__.strip().splitlines()[0])
+    p.add_argument("--json", action="store_true",
+                   help="Emit raw JSON instead of TSV / text where applicable.")
+    sub = p.add_subparsers(dest="cmd", required=True)
+
+    sub.add_parser("status", help="check studio reachability + worker state")
+    sub.add_parser("list", help="list all projects")
+
+    sp = sub.add_parser("files", help="list files in a project")
+    sp.add_argument("pid")
+
+    sp = sub.add_parser("transcript", help="print .txt transcript to stdout")
+    sp.add_argument("pid")
+    sp.add_argument("path", help="absolute path to source media file")
+
+    sp = sub.add_parser("narrative", help="print cached narrative for a transcript")
+    sp.add_argument("pid")
+    sp.add_argument("path", help="absolute path to source media file")
+    sp.add_argument("--style", default="story",
+                    help="story | reflective_essay | scene_breakdown | summary_narrative")
+
+    sp = sub.add_parser("submit", help="enqueue a single YouTube URL")
+    sp.add_argument("pid")
+    sp.add_argument("url")
+    sp.add_argument("--mode", choices=("speech", "music"), default="speech")
+
+    sp = sub.add_parser("playlist", help="create a new project from a public playlist URL")
+    sp.add_argument("url")
+    sp.add_argument("--mode", choices=("speech", "music"), default="speech")
+
+    args = p.parse_args(argv)
+    dispatch = {
+        "status": cmd_status, "list": cmd_list, "files": cmd_files,
+        "transcript": cmd_transcript, "narrative": cmd_narrative,
+        "submit": cmd_submit, "playlist": cmd_playlist,
+    }
+    dispatch[args.cmd](args)
+
+
+if __name__ == "__main__":
+    main()

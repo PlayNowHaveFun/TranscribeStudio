@@ -442,6 +442,68 @@ Things this contract **deliberately does not** ship in v1:
 
 ---
 
+## §7. Read access for external consumers
+
+§1–§6 cover writing to the studio (Information Studio enqueuing YouTube jobs). This section covers **reading from it** — the access pattern used by Claude Code skills (e.g. `narrative-builder`), ad-hoc scripts, and any future MCP server.
+
+Same constraints apply: localhost only, no auth, JSON in / JSON out.
+
+### 7.1 Convenience CLI — `bin/ts`
+
+Most external consumers should shell out to `bin/ts` (in this repo) rather than wire HTTP themselves:
+
+```
+ts status                              # studio reachable + what worker's doing
+ts list                                # all projects, TSV
+ts files <pid>                         # files in a project + transcribe status
+ts transcript <pid> <abs_path>         # .txt content to stdout
+ts narrative <pid> <abs_path> --style story
+ts submit <pid> <youtube_url> --mode speech|music
+ts playlist <playlist_url> --mode speech|music
+```
+
+Each subcommand exits 0/1 and surfaces server messages on stderr. `--json` on any subcommand emits the raw API payload instead of TSV/text — useful for skills that want to consume structured data without re-parsing.
+
+Override the base URL via `TS_BASE_URL` if you're not on the default `http://127.0.0.1:5180`.
+
+### 7.2 HTTP endpoints — `[exists today]`
+
+For consumers that can't shell out (web pages, MCP servers, non-local tools), the raw routes:
+
+| Route                                              | Purpose                                          |
+|----------------------------------------------------|--------------------------------------------------|
+| `GET  /api/status`                                 | Worker state, project summaries, AC/battery     |
+| `GET  /api/projects`                               | List all projects (full config)                  |
+| `GET  /api/projects/<pid>`                         | One project                                      |
+| `GET  /api/projects/<pid>/files`                   | Scanned files + per-file transcribe status       |
+| `GET  /api/projects/<pid>/transcript?path=<abs>`   | `.txt` content + quality flags + analysis sidecar|
+| `GET  /api/projects/<pid>/narrative?path=<abs>&style=<s>` | Cached narrative for a style (404 if none) |
+
+`<abs>` is the absolute path to the source media file (the file the transcript was generated from). The studio resolves transcript / narrative / analysis paths from the source path via the project's whisper config — callers shouldn't try to guess `.txt` paths themselves.
+
+### 7.3 Playlist-as-project — `[exists today]`
+
+Added after §3 was written. A public playlist URL becomes a whole project, with each video queued as a YouTube-ingest row in that project's inbox:
+
+| Route                                       | Purpose                                                  |
+|---------------------------------------------|----------------------------------------------------------|
+| `POST /api/projects/from-playlist/preview`  | Peek at a playlist — title, item count, sample, skipped  |
+| `POST /api/projects/from-playlist`          | Create project + bulk-enqueue every available video      |
+
+Request: `{playlist_url, mode?}`. No OAuth required — yt-dlp's `--flat-playlist` works on any public/unlisted playlist URL containing `?list=PL...`. Private/personal playlists need OAuth and are out of scope for v1.
+
+### 7.4 Caller expectations
+
+The studio is a localhost daemon, not a public service. Consumers should:
+
+- Treat `connection refused` as "studio isn't running" (not an error) — recover by prompting the user to open it.
+- Poll `/api/status` at most every few seconds; the UI itself polls at 2s.
+- Cache transcript content — the file on disk is the source of truth, but it doesn't change once written.
+- Use absolute paths for `?path=` query args. Studio doesn't currently rewrite relative paths.
+- Expect the studio to return its own pid/path strings in responses — don't try to URL-encode-decode them. They're for round-tripping back, not display.
+
+---
+
 ## Appendix A — Quick reference (one-screen cheat sheet)
 
 ```
@@ -458,6 +520,21 @@ POST   /api/projects/<pid>/youtube
 DELETE /api/projects/<pid>/youtube/<url_id>
 POST   /api/projects/<pid>/youtube/<url_id>/prioritize
 POST   /api/projects/<pid>/youtube/<url_id>/retry
+
+  Read access for external consumers (§7):
+GET    /api/status                                  worker + projects summary
+GET    /api/projects                                list projects
+GET    /api/projects/<pid>                          one project
+GET    /api/projects/<pid>/files                    files + transcribe status
+GET    /api/projects/<pid>/transcript?path=<abs>    transcript .txt + analysis
+GET    /api/projects/<pid>/narrative?path=<abs>&style=<s>   cached narrative
+
+  Playlist-as-project (§7.3):
+POST   /api/projects/from-playlist/preview {playlist_url}    peek (no commit)
+POST   /api/projects/from-playlist         {playlist_url, mode?}   create + bulk-enqueue
+
+  Convenience CLI (no HTTP wiring needed):
+bin/ts {status,list,files,transcript,narrative,submit,playlist} …
 ```
 
 ---
