@@ -168,11 +168,21 @@ input, textarea, select { font-family: inherit; font-size: inherit; color: var(-
   cursor: pointer;
   transition: border-color var(--transition), color var(--transition), background var(--transition);
 }
+.add-project + .add-project { margin-top: 6px; }
 .add-project:hover {
   border-color: var(--accent);
   color: var(--accent-text);
   background: var(--accent-soft);
 }
+
+.pl-sample {
+  margin: 8px 0 0 0;
+  padding-left: 18px;
+  max-height: 180px;
+  overflow-y: auto;
+  font-size: 13px;
+}
+.pl-sample li { margin: 2px 0; }
 
 .sidebar-footer {
   margin-top: auto;

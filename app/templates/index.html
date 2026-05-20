@@ -22,6 +22,7 @@
       </nav>
 
       <button class="add-project" id="add-project-btn">＋ New project</button>
+      <button class="add-project" id="add-playlist-btn">＋ Add from YouTube playlist</button>
 
       <div class="sidebar-footer">
         <div class="status-pill" id="agent-pill">
@@ -121,6 +122,49 @@
       <div class="modal-actions">
         <button class="btn-secondary" id="np-cancel">Cancel</button>
         <button class="btn-primary" id="np-create">Create project</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Add-from-playlist modal -->
+  <!--
+    Two-step flow:
+      1. URL input + "Preview" button.
+      2. After fetch, show playlist title / item count / sample,
+         pick mode (speech/music), confirm create.
+    Both panes live in this modal; JS toggles their visibility.
+  -->
+  <div class="modal-backdrop" id="playlist-modal" hidden>
+    <div class="modal">
+      <h2>Add YouTube playlist as project</h2>
+      <p class="muted small">Paste a public YouTube playlist URL. Studio will create a new project named after the playlist and queue every video for transcription.</p>
+
+      <!-- Step 1: URL entry -->
+      <div id="pl-step-url">
+        <label>Playlist URL
+          <input id="pl-url" type="text" placeholder="https://www.youtube.com/playlist?list=PL…" />
+        </label>
+        <div class="muted small" id="pl-url-status"></div>
+        <div class="modal-actions">
+          <button class="btn-secondary" id="pl-cancel-1">Cancel</button>
+          <button class="btn-primary" id="pl-preview">Preview playlist</button>
+        </div>
+      </div>
+
+      <!-- Step 2: Preview + confirm -->
+      <div id="pl-step-preview" hidden>
+        <div id="pl-preview-body"></div>
+        <label style="margin-top:12px;">Mode
+          <select id="pl-mode">
+            <option value="speech">Speech (podcasts, talks, interviews)</option>
+            <option value="music">Music (vocal/instrumental split via Demucs)</option>
+          </select>
+        </label>
+        <div class="muted small" id="pl-create-status"></div>
+        <div class="modal-actions">
+          <button class="btn-secondary" id="pl-back">← Back</button>
+          <button class="btn-primary" id="pl-create">Create project + queue videos</button>
+        </div>
       </div>
     </div>
   </div>

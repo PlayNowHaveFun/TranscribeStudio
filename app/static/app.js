@@ -1363,6 +1363,8 @@ function bindNewProjectHandlers() {
   };
   $("#tx-close").onclick = closeAllModals;
 
+  bindPlaylistHandlers();
+
   $$(".modal-backdrop").forEach(bd => {
     bd.addEventListener("click", (e) => {
       if (e.target === bd) closeAllModals();
@@ -1371,6 +1373,94 @@ function bindNewProjectHandlers() {
 
   document.addEventListener("keydown", (e) => {
     if (e.key === "Escape") closeAllModals();
+  });
+}
+
+// ---------- Add-from-playlist modal ----------
+
+function openPlaylistModal() {
+  openModal("playlist-modal");
+  $("#pl-url").value = "";
+  $("#pl-url-status").textContent = "";
+  $("#pl-create-status").textContent = "";
+  $("#pl-step-url").hidden = false;
+  $("#pl-step-preview").hidden = true;
+  setTimeout(() => $("#pl-url").focus(), 50);
+}
+
+async function previewPlaylist() {
+  const url = $("#pl-url").value.trim();
+  if (!url) { $("#pl-url-status").textContent = "Paste a playlist URL first."; return; }
+  const btn = $("#pl-preview");
+  btn.disabled = true;
+  $("#pl-url-status").textContent = "Fetching playlist… (can take 5-15s for large playlists)";
+  try {
+    const res = await api("/api/projects/from-playlist/preview", {
+      method: "POST", body: { playlist_url: url },
+    });
+    const pl = res.playlist;
+    const sampleHtml = pl.sample.length
+      ? `<ul class="pl-sample">${pl.sample.map(s =>
+          `<li>${escapeHtml(s.title)}${s.uploader ? ` <span class="muted small">— ${escapeHtml(s.uploader)}</span>` : ""}</li>`
+        ).join("")}${pl.item_count > pl.sample.length ? `<li class="muted small">…and ${pl.item_count - pl.sample.length} more</li>` : ""}</ul>`
+      : `<p class="muted small">No previewable items.</p>`;
+    const skipNote = pl.skipped_count
+      ? `<p class="muted small">${pl.skipped_count} entr${pl.skipped_count===1?"y":"ies"} unavailable (private / deleted / region-blocked) and will be skipped.</p>`
+      : "";
+    const existsNote = pl.project_exists
+      ? `<p class="muted small">⚠ A project with id <code>${escapeHtml(pl.suggested_project_id)}</code> already exists. A new project will be created with a unique suffix.</p>`
+      : "";
+    $("#pl-preview-body").innerHTML = `
+      <h3 style="margin:0 0 4px 0;">${escapeHtml(pl.title)}</h3>
+      ${pl.uploader ? `<p class="muted small" style="margin:0 0 12px 0;">by ${escapeHtml(pl.uploader)}</p>` : ""}
+      <p><strong>${pl.item_count}</strong> video${pl.item_count===1?"":"s"} will be queued.</p>
+      ${skipNote}
+      ${existsNote}
+      <p class="muted small">Folder: <code>${escapeHtml(pl.suggested_folder)}</code></p>
+      ${sampleHtml}
+    `;
+    // Stash the URL so the create step uses the exact same one (server re-fetches).
+    $("#pl-create").dataset.playlistUrl = url;
+    $("#pl-step-url").hidden = true;
+    $("#pl-step-preview").hidden = false;
+  } catch (e) {
+    $("#pl-url-status").textContent = "Couldn't fetch playlist: " + e.message;
+  } finally {
+    btn.disabled = false;
+  }
+}
+
+async function createPlaylistProject() {
+  const url = $("#pl-create").dataset.playlistUrl;
+  const mode = $("#pl-mode").value;
+  if (!url) return;
+  const btn = $("#pl-create");
+  btn.disabled = true;
+  $("#pl-create-status").textContent = "Creating project and queuing videos…";
+  try {
+    const res = await api("/api/projects/from-playlist", {
+      method: "POST", body: { playlist_url: url, mode },
+    });
+    closeAllModals();
+    switchView("project", res.project.id);
+  } catch (e) {
+    $("#pl-create-status").textContent = "Failed: " + e.message;
+  } finally {
+    btn.disabled = false;
+  }
+}
+
+function bindPlaylistHandlers() {
+  $("#add-playlist-btn").onclick = openPlaylistModal;
+  $("#pl-cancel-1").onclick = closeAllModals;
+  $("#pl-back").onclick = () => {
+    $("#pl-step-preview").hidden = true;
+    $("#pl-step-url").hidden = false;
+  };
+  $("#pl-preview").onclick = previewPlaylist;
+  $("#pl-create").onclick = createPlaylistProject;
+  $("#pl-url").addEventListener("keydown", (e) => {
+    if (e.key === "Enter") { e.preventDefault(); previewPlaylist(); }
   });
 }
 

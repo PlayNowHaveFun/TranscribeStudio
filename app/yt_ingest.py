@@ -57,6 +57,7 @@ class MissingDemucsError(YtIngestError): pass
 class YtDlpFailedError(YtIngestError): pass
 class DemucsFailedError(YtIngestError): pass
 class InvalidMetadataError(YtIngestError): pass
+class NotAPlaylistError(YtIngestError): pass
 
 
 # --------------------------------------------------------------------------
@@ -420,6 +421,108 @@ class YtIngest:
             "vocals": str(vocals_mp3),
             "instrumental": str(instr_mp3),
         })
+
+
+# --------------------------------------------------------------------------
+# Public-playlist metadata fetch — yt-dlp, no API key, no OAuth.
+#
+# Single-shot helper (not part of YtIngest because it doesn't ingest audio,
+# just enumerates a playlist's items). Used by /api/projects/from-playlist
+# to turn a pasted playlist URL into a list of video URLs we can enqueue.
+#
+# Pagination caveat: --flat-playlist tells yt-dlp not to resolve each item,
+# so the returned `entries[].url` is just the video URL string. Per-entry
+# metadata is sparse on purpose — full metadata gets fetched at ingest time
+# by YtIngest.fetch_metadata.
+# --------------------------------------------------------------------------
+
+def fetch_playlist_metadata(playlist_url: str, timeout_sec: int = 120) -> dict:
+    """Enumerate a public YouTube playlist's items via yt-dlp.
+
+    Returns:
+        {
+          "playlist_id": str | None,
+          "title":       str,
+          "uploader":    str | None,
+          "item_count":  int,                  # entries actually returned
+          "items": [
+            {
+              "url":          str,             # canonical video URL
+              "video_id":     str | None,
+              "title":        str,
+              "uploader":     str | None,
+              "duration":     float | None,    # seconds; None on flat-playlist
+              "availability": str | None,      # "public" | "private" | "unlisted" | "needs_auth" | ...
+            },
+            ...
+          ],
+        }
+
+    Raises:
+        MissingYtDlpError — yt-dlp not installed.
+        YtDlpFailedError  — yt-dlp exited non-zero (network error, bad URL, etc).
+        InvalidMetadataError — yt-dlp returned non-JSON or no entries.
+        NotAPlaylistError — URL pointed at a single video, not a playlist.
+    """
+    bin_ = YtIngest.find_yt_dlp()
+    result = subprocess.run(
+        [
+            bin_,
+            "--flat-playlist",
+            "--dump-single-json",
+            "--no-warnings",
+            playlist_url,
+        ],
+        capture_output=True, text=True, timeout=timeout_sec, cwd="/tmp",
+    )
+    if result.returncode != 0:
+        raise YtDlpFailedError(
+            f"yt-dlp playlist fetch failed (exit {result.returncode}): "
+            f"{result.stderr.strip()[:500]}"
+        )
+    try:
+        raw = json.loads(result.stdout)
+    except json.JSONDecodeError as e:
+        raise InvalidMetadataError(f"yt-dlp returned non-JSON: {e}")
+
+    # When given a non-playlist URL, yt-dlp returns the single video's
+    # metadata blob (no "entries" key). Reject explicitly — the caller is
+    # the playlist-creation flow, not the single-URL ingest flow.
+    if raw.get("_type") != "playlist" and "entries" not in raw:
+        raise NotAPlaylistError(
+            "URL is not a YouTube playlist. Paste a playlist URL "
+            "(e.g. one containing ?list=PL... )."
+        )
+
+    entries = raw.get("entries") or []
+    items: list[dict] = []
+    for e in entries:
+        if not e:
+            # yt-dlp emits None entries for items it couldn't even peek at
+            # (truly private/deleted/blocked-from-the-flat-view). Track but
+            # don't include in items[] — caller computes skipped count from
+            # the difference between raw entries and items.
+            continue
+        items.append({
+            "url":          e.get("url") or e.get("webpage_url") or "",
+            "video_id":     e.get("id"),
+            "title":        e.get("title") or "(untitled)",
+            "uploader":     e.get("uploader") or e.get("channel"),
+            "duration":     e.get("duration"),
+            "availability": e.get("availability"),
+        })
+
+    if not items and not entries:
+        raise InvalidMetadataError("Playlist contains no entries")
+
+    return {
+        "playlist_id": raw.get("id"),
+        "title":       raw.get("title") or "Untitled playlist",
+        "uploader":    raw.get("uploader") or raw.get("channel"),
+        "item_count":  len(items),
+        "raw_entry_count": len(entries),  # for skipped-count math in the caller
+        "items":       items,
+    }
 
 
 # --------------------------------------------------------------------------

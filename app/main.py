@@ -550,6 +550,139 @@ def create_app() -> tuple[Flask, Registry, Worker]:
         worker.wake()
         return jsonify({"ok": True, "url_row": updated})
 
+    # ----- YouTube playlist → project creation -----
+    #
+    # Two routes:
+    #   /preview  — peek at a public playlist without committing to anything.
+    #               Returns title, item count, sample, and a suggested folder.
+    #               The modal calls this first so the user sees what they're
+    #               about to create.
+    #   /create   — actually create the project + bulk-enqueue the items.
+    #               Re-fetches the playlist server-side (don't trust client
+    #               state — the user might leave the modal open for an hour).
+    @app.route("/api/projects/from-playlist/preview", methods=["POST"])
+    def api_playlist_preview():
+        from .yt_ingest import (
+            fetch_playlist_metadata,
+            sanitize_title,
+            MissingYtDlpError, YtDlpFailedError,
+            InvalidMetadataError, NotAPlaylistError,
+        )
+        body = request.get_json(force=True) or {}
+        playlist_url = (body.get("playlist_url") or "").strip()
+        if not playlist_url:
+            return jsonify({"ok": False, "error": "missing_url"}), 400
+        if not (playlist_url.startswith("http://") or playlist_url.startswith("https://")):
+            return jsonify({
+                "ok": False, "error": "invalid_url",
+                "message": "URL must start with http:// or https://",
+            }), 400
+        try:
+            meta = fetch_playlist_metadata(playlist_url)
+        except MissingYtDlpError as e:
+            return jsonify({"ok": False, "error": "missing_yt_dlp", "message": str(e)}), 500
+        except NotAPlaylistError as e:
+            return jsonify({"ok": False, "error": "not_a_playlist", "message": str(e)}), 400
+        except (YtDlpFailedError, InvalidMetadataError) as e:
+            return jsonify({"ok": False, "error": "fetch_failed", "message": str(e)}), 502
+
+        sanitized = sanitize_title(meta["title"])
+        suggested_folder = str(Path.home() / "Documents" / "Transcribe Studio" / "Playlists" / sanitized)
+        suggested_id = slugify(meta["title"])
+        # Don't blow up the response payload with full items[]; the create
+        # call re-fetches anyway. Send title-only samples for the modal.
+        sample = [{"title": it["title"], "uploader": it.get("uploader")} for it in meta["items"][:5]]
+        skipped = max(meta["raw_entry_count"] - meta["item_count"], 0)
+        return jsonify({
+            "ok": True,
+            "playlist": {
+                "title": meta["title"],
+                "uploader": meta.get("uploader"),
+                "playlist_id": meta.get("playlist_id"),
+                "item_count": meta["item_count"],
+                "skipped_count": skipped,
+                "sample": sample,
+                "suggested_project_name": meta["title"],
+                "suggested_project_id": suggested_id,
+                "suggested_folder": suggested_folder,
+                "project_exists": registry.get(suggested_id) is not None,
+            },
+        })
+
+    @app.route("/api/projects/from-playlist", methods=["POST"])
+    def api_playlist_create():
+        from .yt_ingest import (
+            fetch_playlist_metadata,
+            sanitize_title,
+            MissingYtDlpError, YtDlpFailedError,
+            InvalidMetadataError, NotAPlaylistError,
+        )
+        body = request.get_json(force=True) or {}
+        playlist_url = (body.get("playlist_url") or "").strip()
+        mode = (body.get("mode") or "speech").strip().lower()
+        if not playlist_url:
+            return jsonify({"ok": False, "error": "missing_url"}), 400
+        if mode not in _ALLOWED_MODES:
+            return jsonify({
+                "ok": False, "error": "invalid_mode",
+                "message": f"mode must be one of {_ALLOWED_MODES}",
+            }), 400
+
+        try:
+            meta = fetch_playlist_metadata(playlist_url)
+        except MissingYtDlpError as e:
+            return jsonify({"ok": False, "error": "missing_yt_dlp", "message": str(e)}), 500
+        except NotAPlaylistError as e:
+            return jsonify({"ok": False, "error": "not_a_playlist", "message": str(e)}), 400
+        except (YtDlpFailedError, InvalidMetadataError) as e:
+            return jsonify({"ok": False, "error": "fetch_failed", "message": str(e)}), 502
+
+        sanitized = sanitize_title(meta["title"])
+        folder = Path.home() / "Documents" / "Transcribe Studio" / "Playlists" / sanitized
+        folder.mkdir(parents=True, exist_ok=True)
+
+        # Project ID collision: if a project with this slug already exists,
+        # append a short suffix from the playlist_id so re-adding the same
+        # playlist twice doesn't clobber the first one.
+        pid = slugify(meta["title"])
+        if registry.get(pid):
+            suffix = (meta.get("playlist_id") or "dup")[-6:].lower()
+            pid = f"{pid}-{suffix}"
+
+        proj = Project(
+            id=pid,
+            name=meta["title"],
+            folders=[str(folder)],
+            config=WhisperConfig(
+                model="ggml-large-v3.bin",
+                language="auto",
+                translate_to_english=False,
+                formats=("txt", "srt"),
+            ),
+            youtube_enabled=True,
+            youtube_default_mode=mode,
+            notes=f"Created from YouTube playlist: {playlist_url}",
+        )
+        registry.add(proj)
+        state = registry.state(pid)
+
+        queued = 0
+        for item in meta["items"]:
+            url = item.get("url") or ""
+            if not url:
+                continue
+            state.add_url(url, mode)
+            queued += 1
+
+        worker.wake()
+        skipped = max(meta["raw_entry_count"] - queued, 0)
+        return jsonify({
+            "ok": True,
+            "project": _full(proj, registry),
+            "queued_count": queued,
+            "skipped_count": skipped,
+        }), 201
+
     # ----- audio serving (for Music tab HTML5 players) -----
     @app.route("/api/audio")
     def api_audio():
