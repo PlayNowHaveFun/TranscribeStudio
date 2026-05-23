@@ -796,10 +796,10 @@ function renderYoutubePanelInto(targetId, p, prevStatus) {
           <div style="font-weight:600;">Playlists</div>
           <button class="btn-secondary" id="yt-pl-toggle-form">＋ Add playlist</button>
         </div>
-        <div id="yt-pl-add-form" hidden style="display:flex; gap:8px; align-items:center; margin-bottom:10px;">
-          <input type="url" id="yt-pl-url-input" placeholder="https://www.youtube.com/playlist?list=PL…"
-                 style="flex:1; padding:8px; border:1px solid var(--border); border-radius:6px;"/>
-          <select id="yt-pl-mode-select" style="padding:8px; border:1px solid var(--border); border-radius:6px;">
+        <div id="yt-pl-add-form" hidden class="yt-add-row">
+          <input type="url" id="yt-pl-url-input" class="yt-text-input"
+                 placeholder="https://www.youtube.com/playlist?list=PL…" />
+          <select id="yt-pl-mode-select" class="yt-select">
             <option value="speech">Speech</option>
             <option value="music">Music</option>
           </select>
@@ -808,10 +808,10 @@ function renderYoutubePanelInto(targetId, p, prevStatus) {
         <div class="muted small" id="yt-pl-form-status" style="margin-bottom:8px;"></div>
         <div id="yt-pl-list"></div>
       </div>
-      <div class="yt-input-row" style="display:flex; gap:8px; align-items:center; margin-bottom:12px;">
-        <input type="url" id="yt-url-input" placeholder="https://www.youtube.com/watch?v=..."
-               style="flex:1; padding:8px; border:1px solid var(--border); border-radius:6px;"/>
-        <select id="yt-mode-select" style="padding:8px; border:1px solid var(--border); border-radius:6px;">
+      <div class="yt-input-row yt-add-row">
+        <input type="url" id="yt-url-input" class="yt-text-input"
+               placeholder="https://www.youtube.com/watch?v=..." />
+        <select id="yt-mode-select" class="yt-select">
           <option value="speech">Speech</option>
           <option value="music">Music</option>
         </select>

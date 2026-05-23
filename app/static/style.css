@@ -679,6 +679,39 @@ details summary:hover { color: var(--text); }
 .yt-pl-table .actions { visibility: visible; }
 .yt-pl-table .num { text-align: right; }
 .yt-pl-table th.num { text-align: right; }
+
+/* YouTube add-row (playlist add + URL submit) — consistent visible inputs.
+ * Inline styles + faint border were nearly invisible in dark mode; pull
+ * the row into a real CSS class with a filled background. */
+.yt-add-row {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+  margin-bottom: 12px;
+}
+.yt-add-row .yt-text-input {
+  flex: 1;
+  min-width: 0;
+  padding: 8px 10px;
+  background: var(--surface-2);
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-sm, 6px);
+  color: var(--text);
+  font-size: 13px;
+}
+.yt-add-row .yt-text-input::placeholder { color: var(--text-faint); }
+.yt-add-row .yt-text-input:focus {
+  outline: none;
+  border-color: var(--accent, #8b5cf6);
+}
+.yt-add-row .yt-select {
+  padding: 8px 10px;
+  background: var(--surface-2);
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-sm, 6px);
+  color: var(--text);
+  font-size: 13px;
+}
 .yt-disabled-msg { padding: 8px 0; line-height: 1.5; color: var(--text-muted); }
 .yt-disabled-msg code {
   background: var(--surface-3);
