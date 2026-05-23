@@ -320,9 +320,19 @@ modes. Three changes:
   vocals + instrumental moves into the Transcript modal as an audio
   widget at the top, rendered only when the row is a music-mode file.
   That's the right place for "play this while reading the transcript."
+- **Two visually-identical add rows is awkward.** Today the YouTube
+  panel exposes the "+ Add another playlist" form on top and the
+  single-URL "Add URL" inbox immediately below. Both are 1-line
+  forms with [URL input] [Speech/Music select] [Add button] — visual
+  duplicates that imply the user has to choose between two near-
+  identical controls. Collapse them in v2: one input that auto-
+  detects playlist vs. single video from the URL shape (`/playlist?`
+  vs. `/watch?`), with a single Add button that routes to the right
+  endpoint server-side. Mode select stays. Removes the second row
+  entirely and removes the disclosure link too.
 
-Result: one file list, one mode tag, music UX improves rather than
-regresses.
+Result: one file list, one mode tag, one add row, music UX improves
+rather than regresses.
 
 ### P6 — State honesty (idle / paused / empty / scan)
 **Addresses:** PP7, PP1 (in part), and the empty-state catalogue
