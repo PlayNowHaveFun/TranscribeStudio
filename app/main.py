@@ -209,34 +209,87 @@ def create_app() -> tuple[Flask, Registry, Worker]:
         rows = order_files(rows, p.ordering)
         return jsonify(rows)
 
+    def _sync_tracked_playlists(p: Project, state) -> dict:
+        """Sync every tracked playlist on a project and return a roll-up.
+        Runs synchronously in the request (same v1 trade-off as the
+        per-playlist refresh route). Failures land on the row, not in
+        the response — caller decides whether to surface them."""
+        from .yt_ingest import sync_playlist
+        results = []
+        total_added = 0
+        for row in state.list_playlists():
+            updated = sync_playlist(state, row)
+            added = updated.get("last_added_count") or 0
+            total_added += added
+            results.append({
+                "id": updated.get("id"),
+                "title": updated.get("title"),
+                "url": updated.get("url"),
+                "added_count": added,
+                "total_seen": updated.get("last_total_seen") or 0,
+                "status": updated.get("last_status"),
+                "error": updated.get("last_error"),
+            })
+        return {"playlists": results, "total_added": total_added,
+                "playlist_count": len(results)}
+
     @app.route("/api/projects/<pid>/refresh", methods=["POST"])
     def api_projects_refresh(pid):
         p = registry.get(pid)
         if not p:
             abort(404)
         state = registry.state(pid)
+
+        # Sync tracked playlists FIRST so any newly-enqueued URL rows
+        # show up in the next worker tick (worker.wake() below covers both).
+        playlist_summary = _sync_tracked_playlists(p, state) if p.youtube_enabled else \
+            {"playlists": [], "total_added": 0, "playlist_count": 0}
+
         new_files = _scan_for_new_files(p, state)
-        _write_log_line(LOG_PATH, f"REFRESH [{pid}] discovered {len(new_files)} new files")
-        if new_files:
+        _write_log_line(
+            LOG_PATH,
+            f"REFRESH [{pid}] discovered {len(new_files)} new files; "
+            f"playlists synced: {playlist_summary['playlist_count']}, "
+            f"new videos: {playlist_summary['total_added']}",
+        )
+        if new_files or playlist_summary["total_added"]:
             worker.wake()
-        return jsonify({"new_files": new_files, "total": len(new_files)})
+        return jsonify({
+            "new_files": new_files,
+            "total": len(new_files),
+            "playlists": playlist_summary,
+        })
 
     @app.route("/api/refresh-all", methods=["POST"])
     def api_refresh_all():
         results = []
         total_new = 0
+        total_playlist_added = 0
         for p in registry.all():
             state = registry.state(p.id)
+            playlist_summary = _sync_tracked_playlists(p, state) if p.youtube_enabled else \
+                {"playlists": [], "total_added": 0, "playlist_count": 0}
             new_files = _scan_for_new_files(p, state)
             total_new += len(new_files)
-            results.append({"id": p.id, "name": p.name, "new_files": new_files})
+            total_playlist_added += playlist_summary["total_added"]
+            results.append({
+                "id": p.id, "name": p.name,
+                "new_files": new_files,
+                "playlists": playlist_summary,
+            })
         _write_log_line(
             LOG_PATH,
-            f"REFRESH-ALL discovered {total_new} new files across {len(results)} project(s)",
+            f"REFRESH-ALL discovered {total_new} new files + "
+            f"{total_playlist_added} new playlist videos across {len(results)} project(s)",
         )
-        if total_new:
+        if total_new or total_playlist_added:
             worker.wake()
-        return jsonify({"projects": results, "total_new": total_new, "project_count": len(results)})
+        return jsonify({
+            "projects": results,
+            "total_new": total_new,
+            "total_playlist_added": total_playlist_added,
+            "project_count": len(results),
+        })
 
     @app.route("/api/projects/<pid>/transcript")
     def api_transcript(pid):
@@ -796,6 +849,7 @@ def create_app() -> tuple[Flask, Registry, Worker]:
             ),
             youtube_enabled=True,
             youtube_default_mode=mode,
+            youtube_playlist_url=playlist_url,
             notes=f"Created from YouTube playlist: {playlist_url}",
         )
         registry.add(proj)
@@ -1048,8 +1102,10 @@ def _summary(p: Project, registry: Registry) -> dict:
         # YouTube ingest
         "youtube_enabled": p.youtube_enabled,
         "youtube_default_mode": p.youtube_default_mode,
+        "youtube_playlist_url": p.youtube_playlist_url,
         "youtube_counts": yt_counts,
         "youtube_total": sum(yt_counts.values()),
+        "youtube_playlists_count": len(state.list_playlists()),
     }
 
 

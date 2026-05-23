@@ -67,6 +67,7 @@ class Project:
     youtube_enabled: bool = False              # gates the URL inbox UI per project
     youtube_default_mode: str = "speech"       # "speech" | "music" — default mode for new URLs
     youtube_subdir: str = "youtube"            # relative to folders[0]
+    youtube_playlist_url: str = ""             # source playlist if this project was created from one
     music_keep_vocals: bool = True             # if False, delete vocals.mp3 after transcription
     music_force_no_context: bool = True        # apply --no-context for music-mode transcription
     music_demucs_segment: int = 0              # 0 = no segmenting; raise to 7 if OOM on long tracks
@@ -109,6 +110,10 @@ class Project:
             youtube_enabled=d.get("youtube_enabled", False),
             youtube_default_mode=d.get("youtube_default_mode", "speech"),
             youtube_subdir=d.get("youtube_subdir", "youtube"),
+            youtube_playlist_url=d.get(
+                "youtube_playlist_url",
+                _extract_playlist_url_from_notes(d.get("notes", "")),
+            ),
             music_keep_vocals=d.get("music_keep_vocals", True),
             music_force_no_context=d.get("music_force_no_context", True),
             music_demucs_segment=d.get("music_demucs_segment", 0),
@@ -506,6 +511,22 @@ class Registry:
             self._states.pop(project_id, None)
             self._save()
         return True
+
+
+# Backfill helper: legacy "playlist as project" projects stored the source
+# URL only in `notes` as 'Created from YouTube playlist: <url>'. Pulling
+# it into the new first-class field lets the UI offer one-click tracking
+# without forcing the user to re-paste the URL.
+_PLAYLIST_NOTE_RE = re.compile(
+    r"Created from YouTube playlist:\s*(https?://\S+)", re.IGNORECASE
+)
+
+
+def _extract_playlist_url_from_notes(notes: str) -> str:
+    if not notes:
+        return ""
+    m = _PLAYLIST_NOTE_RE.search(notes)
+    return m.group(1).strip() if m else ""
 
 
 def slugify(name: str) -> str:
