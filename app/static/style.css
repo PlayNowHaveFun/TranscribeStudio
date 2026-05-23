@@ -350,6 +350,16 @@ input, textarea, select { font-family: inherit; font-size: inherit; color: var(-
 }
 .btn-danger:hover { background: var(--danger-soft); border-color: var(--danger); }
 
+/* Lower-key "destructive but not primary action" — used for Delete project
+ * in the header, where the action is recoverable (registry-only) and the
+ * button needs to stay visually subordinate to Refresh/Resume. */
+.btn-danger-subtle { color: var(--text-faint); }
+.btn-danger-subtle:hover {
+  background: var(--danger-soft);
+  color: var(--danger);
+  border-color: var(--danger);
+}
+
 .btn-icon {
   background: transparent;
   border: none;
@@ -679,6 +689,42 @@ details summary:hover { color: var(--text); }
 .yt-pl-table .actions { visibility: visible; }
 .yt-pl-table .num { text-align: right; }
 .yt-pl-table th.num { text-align: right; }
+
+/* Auto-track source-playlist checkbox row — prominent toggle for
+ * playlist-derived projects. */
+.yt-pl-track-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 10px 12px;
+  background: var(--surface-2);
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-sm);
+  margin-bottom: 10px;
+  cursor: pointer;
+}
+.yt-pl-track-row input[type="checkbox"] {
+  width: 16px;
+  height: 16px;
+  cursor: pointer;
+  flex-shrink: 0;
+}
+.yt-pl-track-row > span:nth-child(2) {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+.yt-pl-track-title { font-weight: 500; color: var(--text); }
+.yt-pl-track-url {
+  font-family: monospace;
+  font-size: 11px;
+  word-break: break-all;
+}
+.yt-pl-more { margin-top: 8px; }
+.yt-pl-more a { color: var(--text-muted); text-decoration: none; }
+.yt-pl-more a:hover { color: var(--text); text-decoration: underline; }
 
 /* YouTube add-row (playlist add + URL submit) — consistent visible inputs.
  * Inline styles + faint border were nearly invisible in dark mode; pull

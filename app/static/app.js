@@ -389,11 +389,15 @@ function renderHeaderActions(paused) {
        <span class="muted small" id="refresh-status" style="margin-left:8px;"></span>`
     : `<button class="btn-secondary" id="btn-refresh-all">↻ Refresh all</button>
        <span class="muted small" id="refresh-status" style="margin-left:8px;"></span>`;
+  const deleteBtn = state.view === "project"
+    ? `<button class="btn-secondary btn-danger-subtle" id="btn-delete-project" title="Remove project from studio">Delete project</button>`
+    : "";
   target.innerHTML = `
     ${refreshBtn}
     ${paused
       ? `<button class="btn-primary" id="btn-resume">▶ Resume</button>`
       : `<button class="btn-secondary" id="btn-pause">⏸ Pause</button>`}
+    ${deleteBtn}
   `;
   if ($("#btn-resume")) $("#btn-resume").onclick = () =>
     api("/api/resume", { method: "POST" }).then(pollStatus);
@@ -408,9 +412,13 @@ function renderHeaderActions(paused) {
       const res = await api("/api/refresh-all", { method: "POST", body: {} });
       const n = res.total_new || 0;
       const m = res.project_count || 0;
-      status.textContent = n
+      const pl = res.total_playlist_added || 0;
+      const fileMsg = n
         ? `Found ${n} new file${n === 1 ? "" : "s"} across ${m} project${m === 1 ? "" : "s"}`
         : `No new files in ${m} project${m === 1 ? "" : "s"}`;
+      status.textContent = pl
+        ? `${fileMsg} · ${pl} new playlist video${pl === 1 ? "" : "s"}`
+        : fileMsg;
       pollStatus();
     } catch (e) {
       status.textContent = "Refresh failed";
@@ -428,13 +436,56 @@ function renderHeaderActions(paused) {
     try {
       const res = await api(`/api/projects/${pid}/refresh`, { method: "POST", body: {} });
       const n = res.total || 0;
-      status.textContent = n ? `Found ${n} new file${n === 1 ? "" : "s"}` : "No new files";
+      const plSummary = res.playlists || {};
+      const plAdded = plSummary.total_added || 0;
+      const plCount = plSummary.playlist_count || 0;
+      const fileMsg = n ? `Found ${n} new file${n === 1 ? "" : "s"}` : "No new files";
+      const plMsg = plCount === 0
+        ? ""
+        : plAdded
+          ? ` · pulled ${plAdded} new video${plAdded === 1 ? "" : "s"} from playlist${plCount === 1 ? "" : "s"}`
+          : ` · ${plCount} playlist${plCount === 1 ? "" : "s"} up to date`;
+      status.textContent = fileMsg + plMsg;
+      // Surface per-playlist sync errors when they happen — the row's
+      // state already reflects them, but a refresh-time error should
+      // be loud enough for the user to notice without opening the row.
+      const failed = (plSummary.playlists || []).filter(p => p.status === "failed");
+      if (failed.length) {
+        status.textContent += ` · ⚠ ${failed.length} playlist sync${failed.length === 1 ? "" : "s"} failed`;
+      }
       state.fileListLastFetchedAt = 0;  // bust the 15s cache
+      youtubePlaylistsLastFetchedAt = 0;  // refetch the playlist rows for updated last_synced_at
       fetchAndRenderFileList(pid);
+      fetchAndRenderPlaylists(pid);
       pollStatus();
     } catch (e) {
       status.textContent = "Refresh failed";
     } finally {
+      btn.disabled = false;
+    }
+  };
+  if ($("#btn-delete-project")) $("#btn-delete-project").onclick = async () => {
+    const pid = state.selectedProjectId;
+    if (!pid) return;
+    const project = state.status?.projects?.find(x => x.id === pid);
+    const name = project?.name || pid;
+    if (!confirm(
+      `Delete project "${name}"?\n\n` +
+      `This removes it from the studio's project list. Files, downloaded YouTube ` +
+      `videos, and transcripts on disk are NOT touched — you can re-add the project ` +
+      `with the same folder if you change your mind.`
+    )) return;
+    const btn = $("#btn-delete-project");
+    btn.disabled = true;
+    try {
+      await api(`/api/projects/${pid}`, { method: "DELETE" });
+      state.selectedProjectId = null;
+      state.view = "dashboard";
+      state.rendered.view = null;
+      state.rendered.projectId = null;
+      pollStatus();
+    } catch (e) {
+      alert("Delete failed: " + e.message);
       btn.disabled = false;
     }
   };
@@ -790,13 +841,30 @@ function renderYoutubePanelInto(targetId, p, prevStatus) {
   // Enabled: render playlists subsection + URL input + list.
   // Skeleton once, patch on update.
   if (!body.querySelector(".yt-input-row")) {
+    // Auto-track block only renders when this project knows its source
+    // playlist URL (set during "Add from YouTube playlist" creation, or
+    // backfilled from notes). For manually-created projects, we still
+    // expose tracking via the tucked-away "+ Add another playlist" form.
+    const sourceUrl = p.youtube_playlist_url || "";
     body.innerHTML = `
       <div class="yt-playlists" style="margin-bottom:14px;">
-        <div class="flex-between" style="margin-bottom:6px;">
-          <div style="font-weight:600;">Playlists</div>
-          <button class="btn-secondary" id="yt-pl-toggle-form">＋ Add playlist</button>
+        <div style="font-weight:600; margin-bottom:6px;">Playlists</div>
+        ${sourceUrl ? `
+          <label class="yt-pl-track-row" id="yt-pl-track-label">
+            <input type="checkbox" id="yt-pl-track-chk" />
+            <span>
+              <span class="yt-pl-track-title">Auto-track this playlist</span>
+              <span class="muted small yt-pl-track-url" title="${escapeAttr(sourceUrl)}">${escapeHtml(sourceUrl)}</span>
+            </span>
+            <span class="muted small" id="yt-pl-track-status"></span>
+          </label>
+        ` : ""}
+        <div class="muted small" id="yt-pl-form-status" style="margin-bottom:8px;"></div>
+        <div id="yt-pl-list"></div>
+        <div class="yt-pl-more">
+          <a href="#" id="yt-pl-toggle-form" class="muted small">＋ Add another playlist</a>
         </div>
-        <div id="yt-pl-add-form" hidden class="yt-add-row">
+        <div id="yt-pl-add-form" hidden class="yt-add-row" style="margin-top:8px;">
           <input type="url" id="yt-pl-url-input" class="yt-text-input"
                  placeholder="https://www.youtube.com/playlist?list=PL…" />
           <select id="yt-pl-mode-select" class="yt-select">
@@ -805,8 +873,6 @@ function renderYoutubePanelInto(targetId, p, prevStatus) {
           </select>
           <button class="btn-primary" id="yt-pl-add-btn">Add</button>
         </div>
-        <div class="muted small" id="yt-pl-form-status" style="margin-bottom:8px;"></div>
-        <div id="yt-pl-list"></div>
       </div>
       <div class="yt-input-row yt-add-row">
         <input type="url" id="yt-url-input" class="yt-text-input"
@@ -826,7 +892,8 @@ function renderYoutubePanelInto(targetId, p, prevStatus) {
     });
 
     $("#yt-pl-mode-select").value = p.youtube_default_mode || "speech";
-    $("#yt-pl-toggle-form").onclick = () => {
+    $("#yt-pl-toggle-form").onclick = (e) => {
+      e.preventDefault();
       const form = $("#yt-pl-add-form");
       form.hidden = !form.hidden;
       if (!form.hidden) $("#yt-pl-url-input").focus();
@@ -835,6 +902,12 @@ function renderYoutubePanelInto(targetId, p, prevStatus) {
     $("#yt-pl-url-input").addEventListener("keydown", (e) => {
       if (e.key === "Enter") addPlaylist(p.id);
     });
+
+    if ($("#yt-pl-track-chk")) {
+      $("#yt-pl-track-chk").addEventListener("change", (e) => {
+        toggleSourcePlaylistTracking(p.id, sourceUrl, p.youtube_default_mode || "speech", e.target.checked);
+      });
+    }
   }
 
   // Fetch on view-enter, or when youtube_total changes vs. prev poll,
@@ -1013,15 +1086,45 @@ async function fetchAndRenderPlaylists(pid) {
 }
 
 function renderPlaylistsFromCache(pid) {
+  // Sync the auto-track checkbox state (if present) against the cache:
+  // a playlist row whose URL equals the project's source URL means
+  // tracking is on.
+  const chk = $("#yt-pl-track-chk");
+  if (chk) {
+    const project = state.status?.projects?.find(x => x.id === pid);
+    const sourceUrl = project?.youtube_playlist_url || "";
+    const sourceRow = youtubePlaylistsCache.find(r => r.url === sourceUrl);
+    chk.checked = !!sourceRow;
+    const statusEl = $("#yt-pl-track-status");
+    if (statusEl) {
+      if (!sourceRow) {
+        statusEl.textContent = "off";
+      } else if (sourceRow.last_status === "syncing" || youtubePlaylistSyncing.has(sourceRow.id)) {
+        statusEl.textContent = "syncing…";
+      } else if (sourceRow.last_status === "failed") {
+        statusEl.textContent = "last sync failed";
+      } else if (sourceRow.last_synced_at) {
+        statusEl.textContent = `last synced ${new Date(sourceRow.last_synced_at).toLocaleString()}`;
+      } else {
+        statusEl.textContent = "tracking on — hit Refresh to pull videos";
+      }
+    }
+  }
+
   const list = $("#yt-pl-list");
   if (!list) return;
-  if (youtubePlaylistsCache.length === 0) {
-    list.innerHTML = `<div class="muted small">No tracked playlists. Add one to auto-pull new videos into the inbox.</div>`;
+  // The project's source playlist is owned by the checkbox above —
+  // don't render it again as a row.
+  const project = state.status?.projects?.find(x => x.id === pid);
+  const sourceUrl = project?.youtube_playlist_url || "";
+  const additional = youtubePlaylistsCache.filter(r => r.url !== sourceUrl);
+  if (additional.length === 0) {
+    list.innerHTML = "";
     return;
   }
   // Newest-added first; minor UX touch, mirrors how newly-added items
   // show up in other lists in this app.
-  const sorted = [...youtubePlaylistsCache].sort((a, b) =>
+  const sorted = [...additional].sort((a, b) =>
     (b.added_at || "").localeCompare(a.added_at || "")
   );
   list.innerHTML = `<table class="file-table yt-pl-table">
@@ -1084,6 +1187,42 @@ function bindPlaylistRowHandlers(pid) {
       removePlaylist(pid, id);
     });
   });
+}
+
+// Auto-track checkbox handler — single-row mode. When the project has a
+// known source playlist URL (set during "playlist as project" creation
+// or backfilled from notes), the checkbox toggles a tracked-playlist
+// row for that exact URL. Adding+removing is idempotent on URL match.
+async function toggleSourcePlaylistTracking(pid, sourceUrl, mode, enable) {
+  const status = $("#yt-pl-form-status");
+  if (status) status.textContent = enable ? "Enabling tracking…" : "Disabling…";
+  try {
+    if (enable) {
+      const res = await fetch(`/api/projects/${pid}/youtube/playlists`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ playlist_url: sourceUrl, default_mode: mode }),
+      });
+      const data = await res.json();
+      if (!res.ok || !data.ok) {
+        if (status) status.textContent = data.message || data.error || `Couldn't enable (${res.status})`;
+        $("#yt-pl-track-chk").checked = false;
+        return;
+      }
+      if (status) status.textContent = "Tracking on. Hit Refresh to pull videos.";
+    } else {
+      // Find the row for this URL and delete it.
+      const existing = youtubePlaylistsCache.find(r => r.url === sourceUrl);
+      if (existing) {
+        await api(`/api/projects/${pid}/youtube/playlists/${existing.id}`, { method: "DELETE" });
+      }
+      if (status) status.textContent = "Tracking off. Already-enqueued videos stay.";
+    }
+    await fetchAndRenderPlaylists(pid);
+  } catch (e) {
+    if (status) status.textContent = "Toggle failed: " + e.message;
+    $("#yt-pl-track-chk").checked = !enable;  // revert
+  }
 }
 
 async function addPlaylist(pid) {
