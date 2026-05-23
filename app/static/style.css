@@ -690,73 +690,101 @@ details summary:hover { color: var(--text); }
 .yt-pl-table .num { text-align: right; }
 .yt-pl-table th.num { text-align: right; }
 
-/* Auto-track source-playlist checkbox row — prominent toggle for
- * playlist-derived projects. */
+/* Auto-track source-playlist checkbox row — compact one-line toggle.
+ * Overrides the global `label { flex-direction: column }` rule. */
 .yt-pl-track-row {
   display: flex;
+  flex-direction: row;        /* override global label rule */
   align-items: center;
   gap: 10px;
-  padding: 10px 12px;
+  padding: 8px 12px;
   background: var(--surface-2);
   border: 1px solid var(--border-strong);
   border-radius: var(--radius-sm);
-  margin-bottom: 10px;
+  margin-bottom: 8px;
+  margin-top: 0;
   cursor: pointer;
+  font-weight: 400;
 }
 .yt-pl-track-row input[type="checkbox"] {
   width: 16px;
   height: 16px;
-  cursor: pointer;
   flex-shrink: 0;
+  margin: 0;
+  cursor: pointer;
 }
-.yt-pl-track-row > span:nth-child(2) {
+.yt-pl-track-info {
   flex: 1;
-  min-width: 0;
+  min-width: 0;               /* allow URL to ellipsis instead of stretching row */
   display: flex;
   flex-direction: column;
-  gap: 2px;
+  gap: 1px;
+  overflow: hidden;
 }
-.yt-pl-track-title { font-weight: 500; color: var(--text); }
+.yt-pl-track-title {
+  font-size: 13px;
+  font-weight: 500;
+  color: var(--text);
+  line-height: 1.2;
+}
 .yt-pl-track-url {
-  font-family: monospace;
+  font-family: "SF Mono", "Menlo", monospace;
   font-size: 11px;
-  word-break: break-all;
+  color: var(--text-faint);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  line-height: 1.2;
 }
-.yt-pl-more { margin-top: 8px; }
-.yt-pl-more a { color: var(--text-muted); text-decoration: none; }
+.yt-pl-track-status {
+  flex-shrink: 0;
+  font-size: 11px;
+  color: var(--text-faint);
+  white-space: nowrap;
+}
+.yt-pl-more { margin-top: 6px; margin-bottom: 4px; }
+.yt-pl-more a { color: var(--text-muted); text-decoration: none; font-size: 12px; }
 .yt-pl-more a:hover { color: var(--text); text-decoration: underline; }
 
 /* YouTube add-row (playlist add + URL submit) — consistent visible inputs.
- * Inline styles + faint border were nearly invisible in dark mode; pull
- * the row into a real CSS class with a filled background. */
+ * Overrides global `input[type=url] { width: 100% }` and `select { width: 100% }`
+ * so the input takes remaining flex space and the select sizes to content. */
 .yt-add-row {
   display: flex;
   gap: 8px;
-  align-items: center;
+  align-items: stretch;
   margin-bottom: 12px;
 }
 .yt-add-row .yt-text-input {
-  flex: 1;
+  flex: 1 1 auto;
+  width: auto;                /* defeat global width: 100% */
   min-width: 0;
   padding: 8px 10px;
   background: var(--surface-2);
   border: 1px solid var(--border-strong);
-  border-radius: var(--radius-sm, 6px);
+  border-radius: var(--radius-sm);
   color: var(--text);
   font-size: 13px;
+  margin-bottom: 0;           /* defeat global input margin if any */
 }
 .yt-add-row .yt-text-input::placeholder { color: var(--text-faint); }
 .yt-add-row .yt-text-input:focus {
   outline: none;
-  border-color: var(--accent, #8b5cf6);
+  border-color: var(--accent);
 }
 .yt-add-row .yt-select {
+  flex-shrink: 0;
+  width: auto;                /* defeat global select width: 100% */
   padding: 8px 10px;
   background: var(--surface-2);
   border: 1px solid var(--border-strong);
-  border-radius: var(--radius-sm, 6px);
+  border-radius: var(--radius-sm);
   color: var(--text);
   font-size: 13px;
+}
+.yt-add-row .btn-primary {
+  flex-shrink: 0;
+  white-space: nowrap;
 }
 .yt-disabled-msg { padding: 8px 0; line-height: 1.5; color: var(--text-muted); }
 .yt-disabled-msg code {

@@ -20,6 +20,25 @@ const fmt = {
   },
 };
 
+// Compact timestamp for status chips: HH:MM today, "Mon DD" within a week,
+// "MM/DD" otherwise. Falls back to a full toLocaleString on parse failure.
+function formatShortStamp(iso) {
+  if (!iso) return "—";
+  const d = new Date(iso);
+  if (isNaN(d.getTime())) return iso;
+  const now = new Date();
+  const dayMs = 24 * 60 * 60 * 1000;
+  const sameDay = d.toDateString() === now.toDateString();
+  if (sameDay) {
+    return d.toLocaleTimeString([], { hour: "numeric", minute: "2-digit" });
+  }
+  if ((now - d) < 7 * dayMs) {
+    return d.toLocaleDateString([], { weekday: "short" }) + " " +
+           d.toLocaleTimeString([], { hour: "numeric", minute: "2-digit" });
+  }
+  return d.toLocaleDateString([], { month: "numeric", day: "numeric" });
+}
+
 const state = {
   status: null,
   view: "dashboard",
@@ -852,11 +871,11 @@ function renderYoutubePanelInto(targetId, p, prevStatus) {
         ${sourceUrl ? `
           <label class="yt-pl-track-row" id="yt-pl-track-label">
             <input type="checkbox" id="yt-pl-track-chk" />
-            <span>
+            <span class="yt-pl-track-info">
               <span class="yt-pl-track-title">Auto-track this playlist</span>
-              <span class="muted small yt-pl-track-url" title="${escapeAttr(sourceUrl)}">${escapeHtml(sourceUrl)}</span>
+              <span class="yt-pl-track-url" title="${escapeAttr(sourceUrl)}">${escapeHtml(sourceUrl)}</span>
             </span>
-            <span class="muted small" id="yt-pl-track-status"></span>
+            <span class="yt-pl-track-status" id="yt-pl-track-status"></span>
           </label>
         ` : ""}
         <div class="muted small" id="yt-pl-form-status" style="margin-bottom:8px;"></div>
@@ -1102,11 +1121,13 @@ function renderPlaylistsFromCache(pid) {
       } else if (sourceRow.last_status === "syncing" || youtubePlaylistSyncing.has(sourceRow.id)) {
         statusEl.textContent = "syncing…";
       } else if (sourceRow.last_status === "failed") {
-        statusEl.textContent = "last sync failed";
+        statusEl.textContent = "sync failed";
+        statusEl.title = sourceRow.last_error || "";
       } else if (sourceRow.last_synced_at) {
-        statusEl.textContent = `last synced ${new Date(sourceRow.last_synced_at).toLocaleString()}`;
+        statusEl.textContent = `synced ${formatShortStamp(sourceRow.last_synced_at)}`;
+        statusEl.title = new Date(sourceRow.last_synced_at).toLocaleString();
       } else {
-        statusEl.textContent = "tracking on — hit Refresh to pull videos";
+        statusEl.textContent = "never synced";
       }
     }
   }
@@ -1209,14 +1230,14 @@ async function toggleSourcePlaylistTracking(pid, sourceUrl, mode, enable) {
         $("#yt-pl-track-chk").checked = false;
         return;
       }
-      if (status) status.textContent = "Tracking on. Hit Refresh to pull videos.";
+      if (status) status.textContent = "Tracking enabled — hit Refresh to pull videos.";
     } else {
       // Find the row for this URL and delete it.
       const existing = youtubePlaylistsCache.find(r => r.url === sourceUrl);
       if (existing) {
         await api(`/api/projects/${pid}/youtube/playlists/${existing.id}`, { method: "DELETE" });
       }
-      if (status) status.textContent = "Tracking off. Already-enqueued videos stay.";
+      if (status) status.textContent = "Tracking off. Already-enqueued videos remain.";
     }
     await fetchAndRenderPlaylists(pid);
   } catch (e) {
