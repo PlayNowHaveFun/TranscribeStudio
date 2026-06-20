@@ -1493,7 +1493,15 @@ async function generateNarrative({ force }) {
   const regen = $("#tx-narrate-regen");
   const status = $("#tx-narrate-status");
   btn.disabled = true; regen.disabled = true;
-  status.textContent = force ? "regenerating… (30–90s)" : "generating… (30–90s)";
+  const verb = force ? "Regenerating" : "Generating";
+  status.innerHTML = `<span class="tx-status-row"><span class="tx-spinner"></span>${verb}… (30–90s)</span>`;
+  // Replace the body with a centered loading state so the wait is unambiguous.
+  $("#tx-scaffold-body").hidden = true;
+  $("#tx-narrative-body").innerHTML = `<div class="tx-loading">
+    <div class="tx-spinner lg"></div>
+    <div class="tx-loading-label">${verb} narrative with Claude Opus 4.7…</div>
+    <div class="tx-loading-sub">This typically takes 30–90 seconds</div>
+  </div>`;
   try {
     const res = await fetch(`/api/projects/${pid}/narrate`, {
       method: "POST",
@@ -1503,6 +1511,7 @@ async function generateNarrative({ force }) {
     const data = await res.json();
     if (!res.ok || !data.ok) {
       status.textContent = "";
+      resetNarrativePane();
       alert(data.message || data.error || `narrate failed (${res.status})`);
       return;
     }
@@ -1510,6 +1519,7 @@ async function generateNarrative({ force }) {
     status.textContent = data.cached ? "cached" : "generated";
   } catch (e) {
     status.textContent = "";
+    resetNarrativePane();
     alert("Generate failed: " + e.message);
   } finally {
     btn.disabled = false; regen.disabled = false;
@@ -1627,16 +1637,23 @@ function bindAnalysisPanelHandlers(pid, path) {
   const btn = $("#btn-analyze");
   if (!btn) return;
   btn.onclick = async () => {
-    btn.disabled = true;
-    btn.textContent = "Analyzing…";
+    // Replace the whole analysis panel with a centered spinner — the local
+    // LLM run can take 20–60s and the button-only "Analyzing…" was easy to miss.
+    const panel = $("#tx-analysis-panel");
+    panel.innerHTML = `<div class="tx-loading">
+      <div class="tx-spinner lg"></div>
+      <div class="tx-loading-label">Analyzing transcript…</div>
+      <div class="tx-loading-sub">Running local model · this can take 20–60s</div>
+    </div>`;
     try {
       // >>> LOCAL LLM CALL — sends this transcript to qwen2.5-coder:14b <<<
       await api(`/api/projects/${pid}/analyze`, { method: "POST", body: { path } });
       // Reload the modal with fresh analysis
       await openTranscript(pid, path);
     } catch (e) {
-      btn.disabled = false;
-      btn.textContent = "✦ Analyze with qwen2.5-coder";
+      // Restore panel so the user can retry
+      panel.innerHTML = renderAnalysisPanel(null, pid, path);
+      bindAnalysisPanelHandlers(pid, path);
       alert("Analysis failed: " + e.message);
     }
   };
